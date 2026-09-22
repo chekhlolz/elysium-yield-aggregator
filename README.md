@@ -1,36 +1,36 @@
 # hypeback
 
-**HYPE delta-neutral vault backtester** — a developer tool for strategy research on HyperCore funding + kHYPE staking yield.
+**HYPE delta-neutral vault backtester + Yield Aggregator simulator** — a dev
+tool for strategy research on HyperCore funding + kHYPE staking yield, and
+the reference implementation for the Elysium builder workstream (Kinetiq).
 
-Built as the warm-up artifact for the [Elysium](https://elysium.kinetiq.xyz) builder workstream (Kinetiq ecosystem). The on-chain aggregator product (idea 1 of the roadmap) is the next vertical; this repo is the dev tool that validates strategy choices before any capital is deployed.
+Two things live here:
+
+1. **The backtester** (`hypeback/`) — simulates delta-hedged HYPE vaults over
+   real HyperCore funding history (Dec 2024 → Sep 2026, 15,750 hourly records)
+   with a lognormal HYPE price path. Includes a kill-gate pre-commit check.
+2. **The aggregator reference** (`solidity/`) — a Solidity skeleton for the
+   ERC-4626 YieldAggregator that would live on Elysium, plus an on-chain
+   simulator (`hypeback/aggregator.py`) that validates the alpha claim.
+
+This is a research artifact, not an audited production system.
 
 ---
 
-## What it does
-
-Simulates a delta-hedged HYPE vault over real HyperCore funding history (Dec 2024 → Sep 2026, 15,750 hourly records) with a lognormal HYPE price path:
-
-- **Long spot** (HYPE, optionally kHYPE with staking yield)
-- **Short perp** (HyperCore HYPE-USDC), sized at hedge ratio HR = perp_notional / spot_value
-- **Position accounting (v4, sanity-verified)**:
-  ```
-  equity = spot_value + cash_all + funding_pnl - fee_paid - perp_pnl
-  ```
-  where `cash_all = free_cash + perp_margin` and `perp_pnl = perp_notional - init_perp_notional`. Margin stays fixed between rebalances; it is collateral, not a position.
-- **Rebalance** on hedge-ratio drift with maker/taker slippage + priority fee
-- **Maintenance margin** and liquidation checks against the HyperCore tier-1 rate (0.5% of notional)
-
-Sanity checks (in `python -m hypeback sanity`) verify:
-- HR=1.0 is truly delta-neutral (equity invariant to a ±5% price move)
-- HR=1.5 has net short delta of −33.3% of capital, as expected
-
 ## Install
 
-Python 3.10+, no third-party deps (stdlib only). Data is bundled.
+Python 3.10+, no third-party deps for the backtester (stdlib only). Data is
+bundled.
 
 ```bash
 cd hypeback
-python -m hypeback sanity     # 0.02s — invariant checks
+python -m hypeback sanity    # 0.02s — invariant checks
+```
+
+For the Solidity toolchain (compile + verify + deploy), also install:
+
+```bash
+pip install py-solc-x web3 eth-abi eth-utils
 ```
 
 ## Usage
@@ -50,12 +50,21 @@ python -m hypeback sweep --hrs 1.0 1.5 2.0 --levs 2 3 5 --rebals 6 12 24
 # kill-gate check (exit 0 = pass, 1 = fail)
 python -m hypeback gate --hr 1.0 --lev 3
 
+# regime-driven aggregator simulation — validates the +3-5% alpha claim
+python -m hypeback agg                          # single seed
+python -m hypeback agg --seeds 30                # aggregate over 30 seeds
+python -m hypeback agg --rebal 24 --json         # hourly rebalance, JSON out
+
+# fetch live funding / candles from HyperCore
+python -m hypeback fetch --coin HYPE --hours 8760
+python -m hypeback fetch --coin HYPE --candles --candles-out data/candles.json
+
 # local web UI with charts
 python -m hypeback serve --port 8760
 # → http://127.0.0.1:8760
 ```
 
-### Parameters
+### Parameters (engine)
 
 | flag | default | meaning |
 |---|---|---|
@@ -70,26 +79,89 @@ python -m hypeback serve --port 8760
 
 ### Kill gate
 
-`net APY > 4% annualized AND max DD < 15% AND no liquidation`. This is the pre-commit gate for the aggregator product: anything that fails the gate is not deployable, regardless of APY.
+`net APY > 4% annualized AND max DD < 15% AND no liquidation`. This is the
+pre-commit gate for the aggregator product: anything that fails the gate is
+not deployable, regardless of APY.
+
+### Aggregator simulation
+
+`python -m hypeback agg` runs the regime-driven aggregator against a static
+benchmark. The output includes:
+
+- **Alpha** = aggregator net APY − static net APY.
+- **Regime breakdown** (hours in FUNDING_STRONG / WEAK / NEG / HIGH_VOL).
+- **Rebalance count** and fees paid.
+
+**Current empirical finding (2026-09-22, 15 seeds, 2024-12 → 2026-09)**:
+median alpha **+2.10% APY**, aggregator net APY **11.96%** vs static **9.85%**.
+Positive but below the +3-5% claim in `docs/AGGREGATOR_SPEC.md`. See
+`docs/ROADMAP.md §2.2` for what would close the gap.
 
 ## Data
 
-- `data/hype_funding_full.json` — 15,750 hourly funding-rate records, `2024-12-05 → 2026-09-22 UTC`, fetched from the HyperCore `/info` endpoint.
+- `data/hype_funding_full.json` — 15,750 hourly funding-rate records,
+  `2024-12-05 → 2026-09-22 UTC`, fetched from HyperCore's `/info` endpoint.
+  To refetch: `python -m hypeback fetch --coin HYPE --hours 17520`.
 
-To refetch: see `elysium_research/fetch_candles.py` (workstream repo, not part of this artifact).
+## Solidity
 
-## Roadmap
+Contracts live in `solidity/src/`. Compile + verify + dry-run deploy:
 
-1. ~~Backtest engine + CLI + web UI~~ — this repo
-2. **Yield Aggregator Router** — production product, dynamic allocation across 4 yield sources (HYPE staking, kHYPE, perp funding, basis). See `docs/AGGREGATOR_SPEC.md` for the architectural spec.
-3. **Trade-Only-Agent Delegation Protocol** — on-chain standard for scoped trade delegation, the primitive ElysiumCoreWriter will sit on top of.
+```bash
+cd solidity
+python scripts/compile.py                    # build all contracts
+python scripts/verify.py                     # ABI + EIP-712 + events
+python scripts/deploy.py --dry-run \
+  --leg-addr 0x1111111111111111111111111111111111111111 \
+  --leg-addr 0x2222222222222222222222222222222222222222 \
+  --leg-addr 0x3333333333333333333333333333333333333333 \
+  --leg-addr 0x4444444444444444444444444444444444444444
+```
+
+Real deploy:
+
+```bash
+export RPC_URL=https://testnet-rpc.elysium.kinetiq.xyz
+export DEPLOYER_PK=0x...
+python scripts/deploy.py --leg-addr <leg1> --leg-addr <leg2> \
+  --leg-addr <leg3> --leg-addr <leg4>
+```
+
+Real deploy refuses Elysium mainnet (chainId 999) without
+`--yes-i-mean-it`. Manifests land at `solidity/output/deployments/`.
+
+Contracts (10 total, ~17.6 KB, 0 errors, 0 warnings):
+
+| File | Bytes | ABI entries |
+|---|---|---|
+| `src/aggregator/YieldAggregator.sol` | 12,306 | 42 |
+| `src/delegation/TradeOnlyAgent.sol` | 2,839 | 8 |
+| `src/keeper/RegimeDetector.sol` | 2,523 | 11 |
+| `src/interfaces/IYieldAggregator.sol` | 0 | 23 |
+| `src/interfaces/ITradeOnlyAgent.sol` | 0 | 5 |
+| `src/interfaces/IYieldLeg.sol` | 0 | 10 |
+
+**Not shipped**: the four `IYieldLeg` impl contracts (see
+`docs/ROADMAP.md §2.1`). The aggregator's `_legs[4]` is stubbed with
+placeholder addresses in `deploy.py`.
+
+## Docs
+
+- `docs/AGGREGATOR_SPEC.md` — Yield Aggregator architectural spec.
+- `docs/DELEGATION_SPEC.md` — Trade-Only-Agent delegation protocol.
+- `docs/KINETIQ_EMAIL_DRAFT.md` — draft message to the Kinetiq builders channel.
+- `docs/ROADMAP.md` — what's built vs deferred, milestones, what's not-doing.
 
 ## License
 
-MIT. Not investment advice. Numbers are simulation outputs from a synthetic lognormal price path — real vaults will diverge.
+MIT. Not investment advice. Numbers are simulation outputs from a synthetic
+lognormal price path — real vaults will diverge.
 
 ## Workstream context
 
-- Elysium is an Arbitrum Orbit L2 by [Kinetiq](https://kinetiq.xyz), settling to HyperEVM. Mainnet pre-launch as of Sep 2026.
-- HyperCore market-data read precompile + ElysiumCoreWriter predeploy ship ~4 weeks post-mainnet.
-- This backtester is the pre-deployment gate: no aggregator goes live on Elysium without first clearing the kill gate here.
+- Elysium is an Arbitrum Orbit L2 by [Kinetiq](https://kinetiq.xyz), settling
+  to HyperEVM. Mainnet pre-launch as of Sep 2026.
+- HyperCore market-data read precompile + ElysiumCoreWriter predeploy ship
+  ~4 weeks post-mainnet.
+- This backtester is the pre-deployment gate: no aggregator goes live on
+  Elysium without first clearing the kill gate here.

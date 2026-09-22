@@ -129,6 +129,92 @@ def cmd_sanity(args):
     sys.exit(0 if ok else 1)
 
 
+def cmd_fetch(args):
+    from .hypercore import HyperCoreClient
+    import os as _os
+    import json as _json
+    c = HyperCoreClient(base_url=args.base_url) if args.base_url else HyperCoreClient()
+    data_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "data")
+    out_funding = args.out or _os.path.join(data_dir, "hype_funding_full.json")
+    recs = c.funding_history(coin=args.coin, hours=args.hours)
+    _os.makedirs(_os.path.dirname(out_funding), exist_ok=True)
+    with open(out_funding, "w") as f:
+        _json.dump(recs, f)
+    print(f"Funding: {len(recs)} records -> {out_funding}")
+    if args.candles:
+        candles_out = args.candles_out or _os.path.join(data_dir, "hype_candles_1h.json")
+        candles = c.spot_candles(coin=args.coin, interval="1h", hours=args.hours)
+        _os.makedirs(_os.path.dirname(candles_out), exist_ok=True)
+        with open(candles_out, "w") as f:
+            _json.dump(candles, f)
+        print(f"Candles: {len(candles)} records -> {candles_out}")
+
+
+def cmd_agg(args):
+    from .aggregator import (run_aggregator_simulation,
+                             multi_seed_aggregator_simulation,
+                             SimParams)
+    p_kwargs = {}
+    if args.rebal is not None:
+        p_kwargs["rebalance_hours"] = args.rebal
+    if args.vol is not None:
+        p_kwargs["vol_annual"] = args.vol
+    if args.capital is not None:
+        p_kwargs["initial_capital"] = args.capital
+    if args.xhype_drag is not None:
+        p_kwargs["xhype_vol_drag_factor"] = args.xhype_drag
+    p = SimParams(**p_kwargs)
+
+    if args.seeds == 1:
+        r = run_aggregator_simulation(params=p, window_hours=args.window)
+        print(f"Config: capital=${p.initial_capital:,.0f}  vol={p.vol_annual:.0%}  "
+              f"rebal={p.rebalance_hours}h  xHYPE drag={p.xhype_vol_drag_factor:.4f}  "
+              f"seed={p.seed}")
+        print(f"Period: {r['years']:.2f} years ({r['hours']} hours)")
+        print(f"Aggregator equity:    ${r['aggregator_equity']:>12,.2f}")
+        print(f"Static equity:        ${r['static_equity']:>12,.2f}")
+        print(f"Aggregator net APY:   {r['aggregator_net_apy']*100:>7.2f}%")
+        print(f"Static net APY:       {r['static_net_apy']*100:>7.2f}%")
+        print(f"ALPHA (agg - static): {r['alpha_apy']*100:>+7.2f}%")
+        print(f"Max drawdown:         {r['max_drawdown']*100:>7.2f}%")
+        print(f"Fees paid:            ${r['fees_paid']:>10,.2f}  ({r['trades']} rebalances)")
+        print(f"Regime switches:      {r['regime_switches']}")
+        print(f"Regime hours:         {r['regime_counts']}")
+        print()
+        alpha_pct = r["alpha_apy"] * 100
+        if alpha_pct >= 3.0:
+            verdict = "PASS — alpha claim holds (≥3%)"
+        elif alpha_pct >= 0.0:
+            verdict = "WEAK — positive but below 3%"
+        else:
+            verdict = "FAIL — alpha is negative"
+        print(f"ALPHA VERDICT: {verdict}")
+        if args.json:
+            print(json.dumps(r, indent=2, default=str))
+    else:
+        m = multi_seed_aggregator_simulation(num_seeds=args.seeds, params=p)
+        print(f"Multi-seed aggregation over {m['n_seeds']} seeds")
+        print(f"Alpha mean:       {m['alpha_mean']*100:>+7.2f}%")
+        print(f"Alpha median:     {m['alpha_median']*100:>+7.2f}%")
+        print(f"Alpha p10 / p90:  {m['alpha_p10']*100:>+7.2f}% / {m['alpha_p90']*100:>+7.2f}%")
+        print(f"Alpha min / max:  {m['alpha_min']*100:>+7.2f}% / {m['alpha_max']*100:>+7.2f}%")
+        print(f"Positive alpha:   {m['positive_alpha_pct']*100:.0f}% of seeds")
+        print(f"Aggregator APY:   {m['aggregator_apy_mean']*100:>7.2f}%")
+        print(f"Static APY:       {m['static_apy_mean']*100:>7.2f}%")
+        print(f"Max DD median:    {m['max_dd_median']*100:>7.2f}%")
+        print(f"Max DD worst:     {m['max_dd_max']*100:>7.2f}%")
+        mean_alpha_pct = m["alpha_mean"] * 100
+        if mean_alpha_pct >= 3.0 and m["positive_alpha_pct"] > 0.9:
+            verdict = "PASS — alpha claim holds (≥3% in ≥90% of seeds)"
+        elif mean_alpha_pct >= 0.0:
+            verdict = "WEAK — positive but below 3%"
+        else:
+            verdict = "FAIL — alpha is negative on average"
+        print(f"ALPHA VERDICT: {verdict}")
+        if args.json:
+            print(json.dumps(m, indent=2, default=str))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="hypeback",
                                  description=__doc__,
@@ -173,10 +259,32 @@ def main(argv=None):
     p = sub.add_parser("sanity", help="verify delta-neutral accounting invariants")
     p.set_defaults(func=cmd_sanity)
 
+    p = sub.add_parser("agg", help="regime-driven aggregator simulation (alpha vs static)")
+    p.add_argument("--seeds", type=int, default=1, help="number of seeds to aggregate (1 = single)")
+    p.add_argument("--rebal", type=int, default=None, help="rebalance interval hours (default 168)")
+    p.add_argument("--vol", type=float, default=None, help="annualized vol, e.g. 0.7")
+    p.add_argument("--capital", type=float, default=None, help="initial capital USD")
+    p.add_argument("--xhype-drag", type=float, default=None, help="xHYPE vol-drag factor (fraction of |hourly ret|)")
+    p.add_argument("--window", type=int, default=None, help="use only last N hours of funding history")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_agg)
+
     p = sub.add_parser("serve", help="local web UI (charts)")
     p.add_argument("--port", type=int, default=8760)
     from .webserver import serve as _serve
     p.set_defaults(func=lambda a: _serve(a.port))
+
+    p = sub.add_parser("fetch", help="fetch live funding/candles from HyperCore")
+    p.add_argument("--coin", default="HYPE")
+    p.add_argument("--hours", type=int, default=24 * 365 * 2,
+                   help="hours of funding history to fetch (default ~2 years)")
+    p.add_argument("--out", default=None,
+                   help="output path (default: data/hype_funding_full.json)")
+    p.add_argument("--candles", action="store_true",
+                   help="also fetch spot candles to data/hype_candles_1h.json")
+    p.add_argument("--candles-out", default=None)
+    p.add_argument("--base-url", default=None, help="override HyperCore API base URL")
+    p.set_defaults(func=cmd_fetch)
 
     args = ap.parse_args(argv)
     args.func(args)

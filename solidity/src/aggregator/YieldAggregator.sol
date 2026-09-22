@@ -12,58 +12,51 @@ interface IERC20Minimal {
     function transferFrom(address, address, uint256) external returns (bool);
 }
 
-// ---- Safe ERC-20 helpers. ----
+// ---- Safe ERC-20 helpers (raw call + decode to tolerate non-standard tokens). ----
 library SafeERC20 {
     function safeTransfer(IERC20Minimal tok, address to, uint256 v) internal {
-        (bool ok, bytes memory data) = address(tok).call(abi.encodeCall(
-            IERC20Minimal.transfer, (to, v)));
+        (bool ok, bytes memory data) = address(tok).call(abi.encodeCall(IERC20Minimal.transfer, (to, v)));
         require(ok && (data.length == 0 || abi.decode(data, (bool))), "erc20 transfer failed");
     }
-
     function safeTransferFrom(IERC20Minimal tok, address from, address to, uint256 v) internal {
-        (bool ok, bytes memory data) = address(tok).call(abi.encodeCall(
-            IERC20Minimal.transferFrom, (from, to, v)));
+        (bool ok, bytes memory data) = address(tok).call(abi.encodeCall(IERC20Minimal.transferFrom, (from, to, v)));
         require(ok && (data.length == 0 || abi.decode(data, (bool))), "erc20 transferFrom failed");
     }
-
     function safeApprove(IERC20Minimal tok, address to, uint256 v) internal {
-        (bool ok, bytes memory data) = address(tok).call(abi.encodeCall(
-            IERC20Minimal.approve, (to, v)));
+        (bool ok, bytes memory data) = address(tok).call(abi.encodeCall(IERC20Minimal.approve, (to, v)));
         require(ok && (data.length == 0 || abi.decode(data, (bool))), "erc20 approve failed");
     }
 }
 
 /**
  * @title YieldAggregator
- * @notice ERC-4626-style vault with regime-driven allocation across four
- *         yield legs. Full design: docs/AGGREGATOR_SPEC.md.
+ * @notice ERC-4626-style vault with regime-driven allocation across four yield legs.
+ *
+ * Design: docs/AGGREGATOR_SPEC.md.
  *
  * Architecture:
- *   - 4 yield legs (spot, kHYPE, perp funding, basis hedge) — each
- *     implements IYieldLeg, so the aggregator treats them as opaque.
- *   - Allocation weights are basis points (sum = 10_000), set by keeper
- *     via requestAllocation + executePending with a configurable timelock.
- *   - `cancelPending` is open — any caller can abort a pending change
- *     during the timelock, which is the safety net against a compromised
- *     keeper.
+ *   - 4 yield legs (spot, kHYPE, perp funding, basis hedge) each implement
+ *     IYieldLeg. The aggregator treats them as opaque.
+ *   - Allocation weights are basis points (sum = 10_000). Keeper sets them
+ *     through requestAllocation + executePending with a configurable
+ *     timelock. cancelPending is open to anyone (keeper compromise safety).
  *
- * Not shipped to mainnet; this is a reference implementation for the
- * Elysium builder proposal. Production will add governance, accounting
- * snapshots, and leg-specific safety checks.
+ * Not mainnet-audited. Reference implementation for the Elysium builder
+ * proposal; production will add governance, accounting snapshots, leg
+ * safety checks, and a real market-data feed adapter for RegimeDetector.
  */
 contract YieldAggregator {
     using SafeERC20 for IERC20Minimal;
 
     uint256 public constant BPS_DENOM = 10_000;
 
-    // ---- Core storage ----
+    // ---- Core state ----
     IERC20Minimal public immutable asset_;
-    IYieldLeg[4] public legs_;
+    IYieldLeg[4] public legs;
 
-    mapping(address => uint256) public balances;
+    mapping(address => uint256) public shareBalances;
     uint256 public totalShares;
     uint256 private _allocatedTotal;
-
     uint16[4] private _weights;
 
     uint32 public timelockSeconds;
@@ -92,14 +85,14 @@ contract YieldAggregator {
 
     // ---- Modifiers ----
     modifier onlyKeeper() { require(msg.sender == keeper, "not keeper"); _; }
-    modifier onlyOwner() { require(msg.sender == owner, "not owner"); _; }
-    modifier notPaused() { require(!paused, "paused"); _; }
+    modifier onlyOwner()  { require(msg.sender == owner,  "not owner");  _; }
+    modifier notPaused()  { require(!paused,               "paused");     _; }
 
     // ---- Constructor ----
     constructor(
         IERC20Minimal _asset,
         address _keeper,
-        IYieldLeg[4] memory _legs,
+        IYieldLeg[4] memory _legsParams,
         uint32 _timelockSeconds,
         uint16[4] memory _initialWeights
     ) {
@@ -115,23 +108,32 @@ contract YieldAggregator {
         _weights = _initialWeights;
 
         for (uint i = 0; i < 4; i++) {
-            require(address(_legs[i]) != address(0), "zero leg");
-            legs_[i] = _legs[i];
+            require(address(_legsParams[i]) != address(0), "zero leg");
+            legs[i] = _legsParams[i];
         }
     }
 
     // ---- Views ----
     function asset() external view returns (address) { return address(asset_); }
+    function shares(address _owner) external view returns (uint256) { return shareBalances[_owner]; }
     function weights() external view returns (uint16[4] memory) { return _weights; }
+    function legAt(uint256 i) external view returns (address) {
+        require(i < 4, "bad leg index");
+        return address(legs[i]);
+    }
+    function legsView() external view returns (address[4] memory) {
+        address[4] memory out = [address(legs[0]), address(legs[1]), address(legs[2]), address(legs[3])];
+        return out;
+    }
 
     function currentValueOfLeg(uint256 i) public view returns (uint256) {
         require(i < 4, "bad leg index");
-        return legs_[i].currentValue();
+        return legs[i].currentValue();
     }
 
     function totalLegValue() public view returns (uint256) {
         uint256 total = 0;
-        for (uint i = 0; i < 4; i++) total += legs_[i].currentValue();
+        for (uint i = 0; i < 4; i++) total += legs[i].currentValue();
         return total;
     }
 
@@ -141,19 +143,19 @@ contract YieldAggregator {
 
     function currentApyBps() external view returns (uint256) {
         uint256 total = 0;
-        for (uint i = 0; i < 4; i++) total += legs_[i].expectedApy() * _weights[i];
+        for (uint i = 0; i < 4; i++) total += legs[i].expectedApy() * _weights[i];
         return total / BPS_DENOM;
     }
 
     // ---- ERC-4626 accounting ----
     function convertToShares(uint256 assets) public view returns (uint256) {
-        if (totalShares == 0) return assets; // 1:1 bootstrap
+        if (totalShares == 0) return assets;         // 1:1 bootstrap
         return (assets * totalShares) / _totalAssets();
     }
 
-    function convertToAssets(uint256 shares) public view returns (uint256) {
-        if (totalShares == 0) return shares; // 1:1 bootstrap
-        return (shares * _totalAssets()) / totalShares;
+    function convertToAssets(uint256 amount) public view returns (uint256) {
+        if (totalShares == 0) return amount;         // 1:1 bootstrap
+        return (amount * _totalAssets()) / totalShares;
     }
 
     function _totalAssets() internal view returns (uint256) {
@@ -161,78 +163,78 @@ contract YieldAggregator {
     }
 
     // ---- Deposit / mint ----
-    function deposit(uint256 assets, address receiver) external notPaused returns (uint256 shares) {
+    function deposit(uint256 assets, address receiver) external notPaused returns (uint256) {
         require(assets > 0, "zero deposit");
-        shares = convertToShares(assets);
-        require(shares > 0, "dust shares");
+        uint256 newShares = convertToShares(assets);
+        require(newShares > 0, "dust shares");
 
         asset_.safeTransferFrom(msg.sender, address(this), assets);
+        totalShares += newShares;
+        shareBalances[receiver] += newShares;
 
-        totalShares += shares;
-        balances[receiver] += shares;
-
-        // Distribute the new assets across legs per current weights.
         uint256 distributed = _distribute(assets);
         _allocatedTotal += distributed;
 
-        // Any remainder stays in the vault as free cash.
-
-        emit Transfer(address(0), receiver, shares);
-        emit Deposit(msg.sender, receiver, assets, shares);
+        emit Transfer(address(0), receiver, newShares);
+        emit Deposit(msg.sender, receiver, assets, newShares);
+        return newShares;
     }
 
-    function mint(uint256 shares, address receiver) external notPaused returns (uint256 assets) {
-        require(shares > 0, "zero shares");
-        assets = convertToAssets(shares);
+    function mint(uint256 newShares, address receiver) external notPaused returns (uint256) {
+        require(newShares > 0, "zero shares");
+        uint256 assets = convertToAssets(newShares);
         require(assets > 0, "dust assets");
 
         asset_.safeTransferFrom(msg.sender, address(this), assets);
-        totalShares += shares;
-        balances[receiver] += shares;
+        totalShares += newShares;
+        shareBalances[receiver] += newShares;
 
         uint256 distributed = _distribute(assets);
         _allocatedTotal += distributed;
 
-        emit Transfer(address(0), receiver, shares);
-        emit Deposit(msg.sender, receiver, assets, shares);
+        emit Transfer(address(0), receiver, newShares);
+        emit Deposit(msg.sender, receiver, assets, newShares);
+        return assets;
     }
 
     // ---- Withdraw / redeem ----
-    function withdraw(uint256 assets, address receiver, address owner_)
-        external notPaused returns (uint256 shares)
+    function withdraw(uint256 assets, address receiver, address _owner)
+        external notPaused returns (uint256)
     {
         require(assets > 0, "zero withdrawal");
-        shares = convertToShares(assets);
-        require(shares > 0, "dust shares");
+        uint256 newShares = convertToShares(assets);
+        require(newShares > 0, "dust shares");
 
-        if (msg.sender != owner_) {
-            uint256 allowed = asset_.allowance(owner_, msg.sender);
+        if (msg.sender != _owner) {
+            uint256 allowed = asset_.allowance(_owner, msg.sender);
             if (allowed != type(uint256).max) {
                 require(allowed >= assets, "insufficient token allowance");
-                asset_.safeTransferFrom(owner_, address(this), assets);
+                asset_.safeTransferFrom(_owner, address(this), assets);
                 asset_.safeApprove(msg.sender, allowed - assets);
             }
         }
 
-        _redeem(assets, shares, receiver, owner_);
-        emit Withdraw(msg.sender, owner_, receiver, assets, shares);
+        _redeem(assets, newShares, receiver, _owner);
+        emit Withdraw(msg.sender, _owner, receiver, assets, newShares);
+        return newShares;
     }
 
-    function redeem(uint256 shares, address receiver, address owner_)
-        external notPaused returns (uint256 assets)
+    function redeem(uint256 newShares, address receiver, address _owner)
+        external notPaused returns (uint256)
     {
-        require(shares > 0, "zero redeem");
-        assets = convertToAssets(shares);
+        require(newShares > 0, "zero redeem");
+        uint256 assets = convertToAssets(newShares);
         require(assets > 0, "dust assets");
 
-        if (msg.sender != owner_) {
-            uint256 current = asset_.allowance(owner_, msg.sender);
-            require(current >= shares, "insufficient share allowance");
-            asset_.safeApprove(msg.sender, current - shares);
+        if (msg.sender != _owner) {
+            uint256 current = asset_.allowance(_owner, msg.sender);
+            require(current >= newShares, "insufficient share allowance");
+            asset_.safeApprove(msg.sender, current - newShares);
         }
 
-        _redeem(assets, shares, receiver, owner_);
-        emit Withdraw(msg.sender, owner_, receiver, assets, shares);
+        _redeem(assets, newShares, receiver, _owner);
+        emit Withdraw(msg.sender, _owner, receiver, assets, newShares);
+        return assets;
     }
 
     // ---- Allocation control ----
@@ -262,23 +264,21 @@ contract YieldAggregator {
         pendingAllocationId = bytes32(0);
         _pending = PendingAllocation({weights: [uint16(0),uint16(0),uint16(0),uint16(0)], executesAt: 0, reason: ""});
 
-        // Rebalance each leg.
         uint256 total = totalAssets();
         for (uint i = 0; i < 4; i++) {
             uint256 oldTarget = (total * oldW[i]) / BPS_DENOM;
             uint256 newTarget = (total * _weights[i]) / BPS_DENOM;
             if (newTarget > oldTarget) {
                 uint256 delta = newTarget - oldTarget;
-                asset_.safeTransfer(address(legs_[i]), delta);
-                legs_[i].allocateTo(delta);
+                asset_.safeTransfer(address(legs[i]), delta);
+                legs[i].allocateTo(delta);
                 _allocatedTotal += delta;
             } else if (oldTarget > newTarget) {
                 uint256 delta = oldTarget - newTarget;
-                legs_[i].reduceFrom(delta);
+                legs[i].reduceFrom(delta);
                 _allocatedTotal = _allocatedTotal > delta ? _allocatedTotal - delta : 0;
             }
         }
-
         emit AllocationExecuted(id, _weights);
     }
 
@@ -293,14 +293,9 @@ contract YieldAggregator {
 
     // ---- Harvest all legs into vault cash. ----
     function harvestFromAllLegs() external onlyKeeper {
-        for (uint i = 0; i < 4; i++) {
-            legs_[i].harvest();
-            _allocatedTotal -= legs_[i].currentValue();
-            // Recompute after the loop (below).
-        }
-        // Recompute _allocatedTotal from legs.
+        for (uint i = 0; i < 4; i++) legs[i].harvest();
         uint256 newAlloc = 0;
-        for (uint i = 0; i < 4; i++) newAlloc += legs_[i].currentValue();
+        for (uint i = 0; i < 4; i++) newAlloc += legs[i].currentValue();
         _allocatedTotal = newAlloc;
         emit Harvested(newAlloc);
     }
@@ -310,13 +305,11 @@ contract YieldAggregator {
         paused = _p;
         emit PausedUpdated(_p);
     }
-
     function setKeeper(address newKeeper) external onlyOwner {
         require(newKeeper != address(0), "zero keeper");
         keeper = newKeeper;
         emit KeeperUpdated(newKeeper);
     }
-
     function setTimelock(uint32 _ts) external onlyOwner {
         timelockSeconds = _ts;
     }
@@ -326,36 +319,33 @@ contract YieldAggregator {
         for (uint i = 0; i < 4; i++) {
             uint256 portion = (assets * _weights[i]) / BPS_DENOM;
             if (portion == 0) continue;
-            // Send funds to the leg's contract so it can hold them.
-            asset_.safeTransfer(address(legs_[i]), portion);
-            uint256 allocated = legs_[i].allocateTo(portion);
+            asset_.safeTransfer(address(legs[i]), portion);
+            uint256 allocated = legs[i].allocateTo(portion);
             distributed += allocated;
         }
     }
 
-    function _redeem(uint256 assets, uint256 shares, address receiver, address owner_) internal {
-        require(balances[owner_] >= shares, "bad shares balance");
-        require(totalShares >= shares, "bad total shares");
+    function _redeem(uint256 assets, uint256 newShares, address receiver, address _owner) internal {
+        require(shareBalances[_owner] >= newShares, "bad shares balance");
+        require(totalShares >= newShares, "bad total shares");
 
-        balances[owner_] -= shares;
-        totalShares -= shares;
+        shareBalances[_owner] -= newShares;
+        totalShares -= newShares;
 
-        // Pull cash from legs until vault has enough.
         uint256 freeCash = asset_.balanceOf(address(this));
         if (freeCash < assets) {
             uint256 needed = assets - freeCash;
             for (uint i = 0; i < 4 && needed > 0; i++) {
-                uint256 legVal = legs_[i].currentValue();
+                uint256 legVal = legs[i].currentValue();
                 uint256 take = needed > legVal ? legVal : needed;
                 if (take == 0) continue;
-                legs_[i].reduceFrom(take);
+                legs[i].reduceFrom(take);
                 needed -= take;
                 if (_allocatedTotal > take) _allocatedTotal -= take;
                 else _allocatedTotal = 0;
             }
         }
         asset_.safeTransfer(receiver, assets);
-
-        emit Transfer(owner_, address(0), shares);
+        emit Transfer(_owner, address(0), newShares);
     }
 }

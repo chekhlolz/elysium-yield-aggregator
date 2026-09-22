@@ -187,7 +187,17 @@ The 5-minute timelock is a safety net against keeper compromise. During the time
 | On-chain decisions | market-data precompile vs oracle gas | +0.3-0.5% APY (no oracle cost) |
 | Basis opportunity | capture spot-perp basis via BasisHedgeLeg on regime shift | +0.5-1% APY |
 
-**Total edge estimate**: +3-5% APY over Liminal, achievable only if the aggregator reacts faster than the market can adapt to its own rebalancing.
+**Total edge estimate**: +3-5% APY over Liminal, achievable only if the
+aggregator reacts faster than the market can adapt to its own rebalancing.
+
+> **Empirical finding (2026-09-22)**: the aggregator simulator
+> (`hypeback/aggregator.py`) measures **+2.10% APY median alpha over a
+> static benchmark** on 15,750 hours of HyperCore funding history across
+> 15 seeds. This is positive but **below** the +3-5% estimate above.
+> The gap is most likely (a) the 168-hour rebalance interval (vs the
+> spec's 100-200ms on-chain trigger) and (b) the simulated lognormal
+> price path vs real HYPE price data. See `docs/ROADMAP.md §2.2` for
+> what would close the gap.
 
 ## 5. Kill gate
 

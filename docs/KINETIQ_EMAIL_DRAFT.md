@@ -5,8 +5,8 @@
 **Subject**: Elysium Yield Aggregator + Trade-Only-Agent Protocol — proposal for builders allocation
 
 > Status: **DRAFT, NOT SENT.**
-> Read through and adjust before sending. I did not and will not send on your
-> behalf without explicit approval — this is external communication.
+> Read through and adjust before sending. I did not and will not send on
+> your behalf without explicit approval — this is external communication.
 
 ---
 
@@ -46,13 +46,31 @@ history, 2024-12 → 2026-09, before deployment):
 | Delta-neutral baseline (HR=1.0, Lev=3) | **13.28%** | 0.23% | 19.67 | no |
 | Liminal xHYPE (live competitor, TVL $7.04M) | 14.50% | — | — | — |
 | Our Monte-Carlo median edge over Liminal (500 paths) | **+1.41% APY** | 0.44% | 17.56 | 0/500 |
+| Aggregator simulator (regime switching, 15 seeds) | **+2.10% APY vs static** | 0.04% | — | 0/15 |
+
+The last row is the aggregator's own alpha vs a static benchmark — a
++2.10% APY lift from regime switching, measured on the real funding
+dataset. This is **not yet** enough to beat Liminal's 14.50% on its own;
+the aggregator would sit as a delta-neutral floor that occasionally
+outperforms a static strategy. We're shipping the alpha we can measure,
+not the +3–5% we'd like to claim.
 
 **Solidity reference implementation is compiled** (solc 0.8.26, 0 errors,
 0 warnings):
 
-- `YieldAggregator.sol` — ERC-4626 vault, 12 KB bytecode, keeper + timelock + open cancelPending
+- `YieldAggregator.sol` — ERC-4626 vault, 12.3 KB bytecode, keeper + timelock + open cancelPending
 - `RegimeDetector.sol` — market-data precompile adapter, 2.5 KB
+- `TradeOnlyAgent.sol` — EIP-712 trade delegation, 2.8 KB
+- 3 interfaces (`IYieldAggregator`, `IYieldLeg`, `ITradeOnlyAgent`)
 - 4 leg contracts specified but not yet implemented (they implement `IYieldLeg`)
+
+**Dev tooling also in the repo** (open-source, MIT):
+
+- `hypeback/` — Python backtester with 21 unit tests, CLI, web UI
+- `hypeback/aggregator.py` — regime-switching simulator (validates the alpha claim)
+- `hypeback/hypercore.py` — HTTP client for HyperCore + precompile-ready client stub
+- `solidity/scripts/verify.py` — ABI + EIP-712 + event verifier
+- `solidity/scripts/deploy.py` — dry-run and live deploy harness
 
 **Repo**: <URL — put GitHub link here once you push>
 
@@ -107,12 +125,15 @@ Not asking for:
 - Audit completion before mainnet. We'll publish a bug bounty and go
   through a third-party audit between testnet and mainnet, but the repo
   will be deployed without a formal audit report in hand.
+- **+3–5% alpha over Liminal**. Our measurement is +2.1% over a static
+  benchmark. If the regime-switching story is the whole value prop, it's
+  thinner than we'd like to advertise.
 
 ---
 
 **Repo**: <GitHub URL>
-**Docs**: `docs/AGGREGATOR_SPEC.md`, `docs/DELEGATION_SPEC.md`
-**Backtester**: `hypeback/` in the same repo (open source, stdlib-only Python, 11 unit tests)
+**Docs**: `docs/AGGREGATOR_SPEC.md`, `docs/DELEGATION_SPEC.md`, `docs/ROADMAP.md`
+**Backtester**: `hypeback/` in the same repo (open source, stdlib-only Python, 21 unit tests)
 
 We're happy to walk through any of this on a call. Reach out via <handle or email>.
 
@@ -133,12 +154,13 @@ Thanks,
    specific application form or template, mirror that instead of pasting
    this email. The tone ("we can commit / not promising") is honest but
    it assumes Kinetiq reads like an investor, not like a fan.
-5. **Alpha claim caveat.** The "+1.41% APY edge" line is honest but it's
-   thin. If Kinetiq reads deeply, they'll know Liminal has TVL $7.04M and
-   the aggregator needs more than +1.4% to justify competing. The
-   "regime switching adds another +1.5–2%" claim is a hypothesis, not a
-   measurement — hypeback doesn't simulate regime switching yet. Be
-   ready to answer "how did you measure that?" in the follow-up.
+5. **Alpha claim caveat.** The "+2.10% APY vs static" figure is a
+   measurement, not a hypothesis. It's still thin: Liminal has $7.04M
+   TVL and 14.50% live APY, so the aggregator needs to either (a) beat
+   that on its own, or (b) position itself as a complementary strategy
+   (regime-aware layer on top of delta-neutral), not a replacement.
+   The email now frames it as (b). If you'd rather frame it as (a),
+   you need to run more sim time and find a config that clears Liminal.
 6. **Email address.** I don't know Kinetiq's builders contact. Search
    `elysium.kinetiq.xyz` for "builders allocation" — the docs page says
    "Contact the Kinetiq team for integration questions or early access."
@@ -147,3 +169,8 @@ Thanks,
 7. **Do not sign with a corporate identity** if you're an individual.
    Sign as yourself. Kinetiq builders programs are for individual and
    small-team builders, not corporates.
+8. **Repo state.** The four `IYieldLeg` impl contracts are deferred
+   (see `docs/ROADMAP.md §2.1`). The deploy harness ships placeholder
+   leg addresses; a real testnet deploy needs those four contracts
+   first. If you send the email with "testnet deploy within 2 weeks of
+   precompile landing" in it, that's contingent on shipping the legs.

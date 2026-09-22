@@ -1,22 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import "../interfaces/IYieldLeg.sol";
+import "./IYieldLeg.sol";
 
 /**
  * @title IYieldAggregator
- * @notice ERC-4626-style vault with regime-driven allocation across four
- *         yield legs. See docs/AGGREGATOR_SPEC.md for the full design.
+ * @notice Public interface for YieldAggregator (ERC-4626-style vault
+ *         with regime-driven allocation across four yield legs).
  *
- * This interface is purely for external callers (frontends, indexers,
- * other contracts). The concrete `YieldAggregator` contract implements
- * it with its own storage layout.
+ * See ../aggregator/YieldAggregator.sol for the concrete impl and
+ * docs/AGGREGATOR_SPEC.md for the design rationale.
+ *
+ * Note: the implementation exposes `legs` as `IYieldLeg[4] public immutable`,
+ * whose auto-generated getter returns `address[4]`. We match that here
+ * (`legsView()`) and additionally provide `legAt(i)` for safe indexed access.
  */
 interface IYieldAggregator {
     // ---- ERC-20 accounting ----
     function asset() external view returns (address);
-    function totalSupply() external view returns (uint256);
     function totalAssets() external view returns (uint256);
+    function totalShares() external view returns (uint256);
     function shares(address owner) external view returns (uint256);
 
     function convertToShares(uint256 assets) external view returns (uint256);
@@ -30,21 +33,23 @@ interface IYieldAggregator {
 
     // ---- Current regime state ----
     function currentApyBps() external view returns (uint256);
-    function currentWeights() external view returns (uint16[4] memory);
-    function legs() external view returns (
-        address spotVault,
-        address khypeVault,
-        address perpKeeper,
-        address basisHedge
-    );
+    function weights() external view returns (uint16[4] memory);
+    function legsView() external view returns (address[4] memory);
+    function legAt(uint256 i) external view returns (address);
+    function totalLegValue() external view returns (uint256);
 
-    // ---- Pending allocation ----
+    // ---- Pending allocation (keeper + timelock) ----
     function pendingAllocationId() external view returns (bytes32);
     function requestAllocation(uint16[4] calldata newWeights, string calldata reason)
         external returns (bytes32 allocationId);
     function executePending() external;
     function cancelPending(bytes32 allocationId) external;
 
+    // ---- Yield harvesting ----
+    function harvestFromAllLegs() external;
+
     // ---- Governance ----
     function setPaused(bool _paused) external;
+    function setKeeper(address _keeper) external;
+    function setTimelock(uint32 _timelockSeconds) external;
 }
