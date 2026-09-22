@@ -58,13 +58,13 @@ Fresh build stats (source of truth; regenerate with `python scripts/compile.py`)
 
 ```
 contract                  abi  creation B  deployed B
-YieldAggregator            46       11848       13048
+YieldAggregator            46       11869       13069
 TradeOnlyAgent              8        2839        2811
 RegimeDetector             13        2650        2926
-KHYPELeg                   26        6560        7137
-SpotStakingLeg             27        6569        7146
-PerpFundingLeg             32        7085        7713
-BasisHedgeLeg              33        6875        7456
+KHYPELeg                   26        6615        7199
+SpotStakingLeg             27        6624        7208
+PerpFundingLeg             32        7140        7775
+BasisHedgeLeg              33        6988        7576
 SafeERC20                   0         135          85  (library)
 RegimeId                    0         135          85  (enum)
 IYieldAggregator           27           0           0

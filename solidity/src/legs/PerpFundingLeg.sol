@@ -229,7 +229,12 @@ contract PerpFundingLeg is IYieldLeg {
 
     // ---- Owner helpers ----
 
-    function setFixedApyBps(uint256 v) external onlyOwner { fixedApyBps = v; }
+    function setFixedApyBps(uint256 v) external onlyOwner {
+        fixedApyBps = v;
+        // KI-4 fix: refresh cached APY when the funding source is not
+        // live so `expectedApy()` doesn't serve a stale value.
+        if (address(fundingSource) == address(0)) latestApyBps = v;
+    }
     function bumpNonce() external onlyOwner { lastDelegationNonce += 1; }
 
     // ---- Internals ----

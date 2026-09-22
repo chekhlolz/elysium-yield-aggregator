@@ -120,7 +120,8 @@ NOT mainnet-ready.
 ### 2.4 Testing
 
 - **Foundry tests** — forge installed 2026-09-22 (v1.8.3, in
-  `~/.foundry/bin/`). Round-3 smoke suite in place:
+  `~/.foundry/bin/`). Round-4 smoke suite in place (15 new tests since
+  round-3 covering the KI-3/KI-4 regressions):
   - `solidity/test/RegimeDetector.t.sol` — 16 tests (constructor,
     setThresholds owner-gating, priority chain, fuzz invariant, weight
     sums).
@@ -130,7 +131,10 @@ NOT mainnet-ready.
   - `solidity/test/TradeOnlyAgent.t.sol` — 19 tests (EIP-712 signature
     recovery, expiresAt == 0 never-expires sentinel, per-venue
     notional cap, revoke, tampered/wrong-signer rejection).
-  - Total: **63 tests, 0 failed**. Run with `forge test`.
+  - `solidity/test/Legs.t.sol` — 15 tests (KI-4 setFixedApyBps
+    refreshes expectedApy on all 4 legs, KI-3 BasisHedgeLeg dust
+    guard, allocateTo owner gate on all 4 legs, name() regression).
+  - Total: **78 tests, 0 failed**. Run with `forge test`.
   - External verifier (`check_repo.py`) still ignores `solidity/test/`
     because it runs solc directly without forge-std remapping — that
     path is covered by `forge test`.
@@ -140,19 +144,24 @@ NOT mainnet-ready.
   cases (share allowance, first depositor, dust) that static analysis
   can't catch.
 
-### 2.5 Known issues (round-3 P2, not blocking M1)
+### 2.5 Known issues (round-3 P2 log)
 
-The round-3 review caught 6 findings that don't touch correctness in
-the current test-suite surface but will bite at production scale.
-These are documented here so they're not lost between sessions:
+Round-3 review surfaced 6 findings that don't touch correctness in the
+current test-suite surface but will bite at production scale. Three of
+them (KI-3, KI-4, KI-5) got patched in round-4 (commit after `9ae235a`);
+the remaining three are still open and are the M2 checklist:
+
+- **KI-3, KI-4, KI-5** — round-4 fixes, regression tests in
+  `solidity/test/Legs.t.sol` and `YieldAggregator.t.sol`.
+- **KI-1, KI-2, KI-6** — open, tracked below.
 
 | # | Issue | Where | Status |
 |---|---|---|---|
 | KI-1 | Stake legs (`KHYPELeg`, `SpotStakingLeg`) mix unit domains: `khypeBalance` is tracked in HYPE, but `amount` and `allocatedUsd` are in USDC. `currentValue()` multiplies by price to reconcile, but `_distribute` and `reduceFrom` return USDC — leg-internal accounting may drift when the oracle re-prices HYPE. | `src/legs/KHYPELeg.sol`, `src/legs/SpotStakingLeg.sol` | Documented; needs oracle-priced pro-rata on every `allocateTo` / `reduceFrom`. |
 | KI-2 | `writer.openPosition(...)` / `closePosition(...)` in every leg is called with `_zeroSig()` — a placeholder signature that will always fail on a real `ElysiumCoreWriter`. Production flow needs `submitIntent(Delegation, Signature, uint256)` on each leg. | All 4 legs | TODO, listed in §5; production blocker for M2. |
-| KI-3 | `BasisHedgeLeg.allocateTo(1)` double-allocates: with `spotPortion = 1 / 2 = 0`, the `if (spotPortion == 0) spotPortion = amount;` guard re-runs with `perpPortion = amount - spotPortion = 0`, but the code then still calls `_writeOpen` once, so 1 USDC of allocation creates both a spot and perp open with notional 0. | `src/legs/BasisHedgeLeg.sol` | Edge case; add `require(amount >= 2, "dust")` guard. |
-| KI-4 | `setFixedApyBps(v)` on all 4 legs writes `fixedApyBps` but doesn't refresh `latestApyBps`. Until the next `harvest()` or `allocateTo()` runs, `expectedApy()` continues returning the stale `latestApyBps`. | All 4 legs | Add `latestApyBps = v;` to `setFixedApyBps` when `fundingSource` is not live. |
-| KI-5 | `_allocatedTotal` in `YieldAggregator` decrements by `delta` on `executePending`'s reduce path, but `legs[i].reduceFrom(delta)` may return less than `delta` (unstake waiting, rounding). The accounting is optimistic — vault's share balances can exceed `_allocatedTotal + freeCash` on a slow leg. | `src/aggregator/YieldAggregator.sol` | Track actual returned amount from `reduceFrom`, not the target. |
+| KI-3 | ~~`BasisHedgeLeg.allocateTo(1)` double-allocates: with `spotPortion = 1 / 2 = 0`, the `if (spotPortion == 0) spotPortion = amount;` guard re-runs with `perpPortion = amount - spotPortion = 0`, but the code then still calls `_writeOpen` once, so 1 USDC of allocation creates both a spot and perp open with notional 0.~~ | `src/legs/BasisHedgeLeg.sol` | **FIXED in round-4**: added `require(amount >= 2, "dust")` guard in `allocateTo`. Regression test: `test_KI3_BasisHedgeLeg_allocateTo_rejectsDust`. |
+| KI-4 | ~~`setFixedApyBps(v)` on all 4 legs writes `fixedApyBps` but doesn't refresh `latestApyBps`. Until the next `harvest()` or `allocateTo()` runs, `expectedApy()` continues returning the stale `latestApyBps`.~~ | All 4 legs | **FIXED in round-4**: `setFixedApyBps` now sets `latestApyBps = v` when the oracle/fundingSource is unwired. Regression tests: `test_KI4_*Leg_setFixedApyBps_refreshesExpectedApy` (4 legs). |
+| KI-5 | ~~`_allocatedTotal` in `YieldAggregator` decrements by `delta` on `executePending`'s reduce path, but `legs[i].reduceFrom(delta)` may return less than `delta` (unstake waiting, rounding). The accounting is optimistic — vault's share balances can exceed `_allocatedTotal + freeCash` on a slow leg.~~ | `src/aggregator/YieldAggregator.sol` | **FIXED in round-4**: `executePending` and `_redeem` now use the actual `reduceFrom` return value instead of the requested `delta`/`take`. `_redeem` also breaks early if a leg returns 0 to avoid silently under-delivering. |
 | KI-6 | `recordExecution` in `TradeOnlyAgent` accepts a `notional` up to the delegation's `maxNotional`, but the venue-local `usedNotional` cap is per-`(venue, delegator, keeper, nonce)` — a delegation signed once can be used on N venues for a total of N × maxNotional. This is documented in `DELEGATION_SPEC.md §9`; production will add a per-delegation aggregate cap if cross-venue abuse becomes realistic. | `src/delegation/TradeOnlyAgent.sol` | Accepted limitation; not a bug, just a spec tradeoff. |
 
 ## 3. Kinetiq conversation

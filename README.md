@@ -144,13 +144,13 @@ landed this week — see `docs/ROADMAP.md §2.1`:
 
 | File | Bytes | ABI entries |
 |---|---|---|
-| `src/aggregator/YieldAggregator.sol` | 11,848 | 46 |
+| `src/aggregator/YieldAggregator.sol` | 11,869 | 46 |
 | `src/delegation/TradeOnlyAgent.sol` | 2,811 | 8 |
 | `src/keeper/RegimeDetector.sol` | 2,650 | 13 |
-| `src/legs/KHYPELeg.sol` | 6,560 | 26 |
-| `src/legs/SpotStakingLeg.sol` | 6,569 | 27 |
-| `src/legs/PerpFundingLeg.sol` | 7,085 | 32 |
-| `src/legs/BasisHedgeLeg.sol` | 6,875 | 33 |
+| `src/legs/KHYPELeg.sol` | 6,615 | 26 |
+| `src/legs/SpotStakingLeg.sol` | 6,624 | 27 |
+| `src/legs/PerpFundingLeg.sol` | 7,140 | 32 |
+| `src/legs/BasisHedgeLeg.sol` | 6,988 | 33 |
 | `src/interfaces/IYieldAggregator.sol` | 0 | 27 |
 | `src/interfaces/ITradeOnlyAgent.sol` | 0 | 5 |
 | `src/interfaces/IYieldLeg.sol` | 0 | 10 |

@@ -184,9 +184,16 @@ contract KHYPELeg is IYieldLeg {
         }
     }
 
-    /** Governance: change the fixed-APY fallback. */
+    /** Governance: change the fixed-APY fallback.
+     *  Round-4 KI-4 fix: also refresh `latestApyBps` so `expectedApy()`
+     *  reflects the new value immediately instead of waiting for the
+     *  next `harvest()` / `allocateTo()`. Only safe when `oracle` is
+     *  unwired (zero address) — otherwise the oracle read is still
+     *  authoritative and we shouldn't poison the cache.
+     */
     function setFixedApyBps(uint256 v) external onlyOwner {
         fixedApyBps = v;
+        if (address(oracle) == address(0)) latestApyBps = v;
     }
 
     // ---- Internals ----

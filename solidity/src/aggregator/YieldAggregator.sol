@@ -315,8 +315,14 @@ contract YieldAggregator {
                 _allocatedTotal += delta;
             } else if (oldTarget > newTarget) {
                 uint256 delta = oldTarget - newTarget;
-                legs[i].reduceFrom(delta);
-                _allocatedTotal = _allocatedTotal > delta ? _allocatedTotal - delta : 0;
+                // KI-5 fix: use the actual returned amount, not the
+                // requested delta. A leg can return less than `delta`
+                // (unstake waiting period, rounding on partial fill);
+                // accounting the full target would leave `_allocatedTotal`
+                // lower than the legs actually hold, which drifts the
+                // share→asset conversion rate upward.
+                uint256 reduced = legs[i].reduceFrom(delta);
+                _allocatedTotal = _allocatedTotal > reduced ? _allocatedTotal - reduced : 0;
             }
         }
         emit AllocationExecuted(id, _weights);
@@ -391,9 +397,23 @@ contract YieldAggregator {
                 uint256 legVal = legs[i].currentValue();
                 uint256 take = needed > legVal ? legVal : needed;
                 if (take == 0) continue;
-                legs[i].reduceFrom(take);
-                needed -= take;
-                if (_allocatedTotal > take) _allocatedTotal -= take;
+                // KI-5 fix: track the actual returned amount from the leg,
+                // not the requested take. Legs may return less than asked
+                // (unstake waiting period, rounding on partial fill), and
+                // booking the full `take` would drift `_allocatedTotal`
+                // below what the legs actually hold.
+                uint256 returned = legs[i].reduceFrom(take);
+                if (returned == 0) {
+                    // Leg couldn't return anything (full unstake wait).
+                    // Break early so we don't loop through the rest of
+                    // the legs and burn gas — the withdrawal will fail
+                    // downstream on `safeTransfer` if the vault doesn't
+                    // have enough. Better to fail here with an explicit
+                    // condition than to silently under-deliver.
+                    break;
+                }
+                needed -= returned;
+                if (_allocatedTotal > returned) _allocatedTotal -= returned;
                 else _allocatedTotal = 0;
             }
         }

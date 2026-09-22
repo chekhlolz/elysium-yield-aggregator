@@ -183,9 +183,14 @@ contract SpotStakingLeg is IYieldLeg {
         }
     }
 
-    /** Governance: change the fixed-APY fallback. */
+    /** Governance: change the fixed-APY fallback.
+     *  Round-4 KI-4 fix: refresh `latestApyBps` immediately when
+     *  `oracle` is unwired, so `expectedApy()` doesn't serve a stale
+     *  value until the next `harvest()`.
+     */
     function setFixedApyBps(uint256 v) external onlyOwner {
         fixedApyBps = v;
+        if (address(oracle) == address(0)) latestApyBps = v;
     }
 
     // ---- Internal flow (per task spec) ----

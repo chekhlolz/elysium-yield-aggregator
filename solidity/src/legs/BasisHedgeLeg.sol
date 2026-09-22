@@ -149,6 +149,13 @@ contract BasisHedgeLeg is IYieldLeg {
     function allocateTo(uint256 amount) external nonReentrant returns (uint256) {
         require(msg.sender == owner, "not owner");
         require(amount > 0, "zero");
+        // KI-3 fix: `amount == 1` makes the half-split produce
+        // `spotPortion = 0`, which the guard below silently promotes to
+        // `spotPortion = amount`, leaving the perp side at 0 — the leg
+        // then opens a spot long and a perp notional of 0, recording
+        // 1 USDC of allocation against a single-sided position.
+        // Require >= 2 so both sides get a non-zero notional.
+        require(amount >= 2, "dust");
 
         // HR=1.0: half notional long spot, half notional short perp.
         uint256 spotPortion = (amount * HEDGE_RATIO_BPS) / BPS_DENOM / 2;
@@ -224,7 +231,12 @@ contract BasisHedgeLeg is IYieldLeg {
 
     // ---- Owner helpers ----
 
-    function setFixedApyBps(uint256 v) external onlyOwner { fixedApyBps = v; }
+    function setFixedApyBps(uint256 v) external onlyOwner {
+        fixedApyBps = v;
+        // KI-4 fix: refresh cached APY when no oracle is wired so
+        // `expectedApy()` reflects the new value immediately.
+        if (address(oracle) == address(0)) latestApyBps = v;
+    }
     function bumpNonce() external onlyOwner { lastDelegationNonce += 1; }
 
     // ---- Internals ----
