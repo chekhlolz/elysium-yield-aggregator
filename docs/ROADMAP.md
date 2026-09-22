@@ -186,12 +186,12 @@ draft.
 
 ## 4. Milestones
 
-| Milestone | Definition of done |
+| Milestone | Status |
 |---|---|
-| **M1: Research artifact** | Repo + specs + Kinetiq email sent. ✅ (this commit) |
-| **M2: Testnet deployment** | 4 leg contracts ✅ + aggregator live on Elysium testnet with real funding flowing. |
-| **M3: Audit-ready** | Foundry test suite passes. Aggregator math hardened for ERC-4626 edge cases. |
-| **M4: Mainnet** | Audit passed. Governance live. First 100k USD TVL. |
+| **M1: Research artifact** | ✅ Repo + specs + KINETIQ_EMAIL_DRAFT.md (draft, not sent — awaiting Kinetiq contact + GitHub push). |
+| **M2: Testnet deployment** | 🟡 4 leg contracts + aggregator ✅. Round-4 closed KI-3 (BasisHedge dust guard), KI-4 (stale `latestApyBps`), KI-5 (optimistic `_allocatedTotal`). **KI-1** (stake-leg unit drift), **KI-2** (`_zeroSig()` writer stub — production blocker), **KI-6** (per-venue delegation cap — accepted spec) still open; see §2.5. |
+| **M3: Audit-ready** | 🟡 Foundry test suite: **78 tests PASS** (RegimeDetector 16, YieldAggregator 28, TradeOnlyAgent 19, Legs 15) ✅. Verifier `check_repo.py` 0 FAIL ✅. ERC-4626 math hardened for cancelPending/reentrancy/expiry/weights ✅. **Still to close**: invariant tests across the aggregator ↔ leg matrix, integration coverage with a real-ish MockWriter instead of `_zeroSig()`, first-depositor & share-allowance fuzz. |
+| **M4: Mainnet** | ⬜ Audit passed. Governance live. First 100k USD TVL. |
 
 ## 5. Leg TODOs (in-code)
 
