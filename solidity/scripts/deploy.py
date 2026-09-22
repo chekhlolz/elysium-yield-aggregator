@@ -23,6 +23,13 @@ Safety:
 Note: the aggregator constructor requires non-zero leg addresses. For a
 skeleton deploy, --leg-addr-1..4 can be passed as placeholder addresses
 (leg contracts are deferred; see docs/ROADMAP.md).
+
+Testing:
+    `main(argv=..., provider=<web3.Web3>)` accepts both an explicit
+    argument list and a pre-built Web3 instance so unit tests can
+    inject a mock provider (see tests/mock_provider.py) without ever
+    opening a socket. The default code path still builds a real
+    `Web3(Web3.HTTPProvider(...))` exactly as before.
 """
 
 from __future__ import annotations
@@ -34,6 +41,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -145,7 +153,7 @@ def _deploy(web3, name: str, abi: list, bytecode_hex: str,
     signed = acct.sign_transaction(tx)
     raw_tx = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction")
     tx_hash = web3.eth.send_raw_transaction(raw_tx)
-    print(f"[{name}] sent tx {tx_hash.hex()}")
+    print(f"[{name}] sent tx 0x{tx_hash.hex()}")
     receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=240)
     if receipt.status != 1:
         raise RuntimeError(f"{name} deployment reverted: {receipt}")
@@ -154,7 +162,7 @@ def _deploy(web3, name: str, abi: list, bytecode_hex: str,
     return {
         "name": name,
         "address": address,
-        "tx_hash": tx_hash.hex(),
+        "tx_hash": "0x" + tx_hash.hex(),
         "block_number": receipt.blockNumber,
         "gas_used": receipt.gasUsed,
         "chain_id": web3.eth.chain_id,
@@ -180,7 +188,7 @@ def _encode_constructor(bytecode_hex: str, abi: list, args: tuple) -> str:
     return "0x" + bytecode_hex + payload.hex()
 
 
-def main():
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--rpc-url", default=None)
     ap.add_argument("--chain-id", type=int, default=None)
@@ -197,7 +205,24 @@ def main():
                     help="initial leg weights in bps, comma-separated (sum=10000)")
     ap.add_argument("--leg-addr", action="append", default=[],
                     help="leg address; pass 4 times for the aggregator")
-    args = ap.parse_args()
+    return ap
+
+
+def main(argv: Optional[list] = None, provider=None) -> int:
+    """Run the deploy harness.
+
+    Args:
+        argv: argument vector for argparse. Defaults to ``sys.argv[1:]``
+              so the CLI entry point keeps working as before. Tests can
+              pass an explicit list to avoid depending on ``sys.argv``.
+        provider: a pre-built ``web3.Web3`` instance to inject. When
+              provided, this short-circuits the default
+              ``Web3(Web3.HTTPProvider(...))`` construction. This is
+              the documented injection point for
+              ``tests/mock_provider.py`` — no code changes are needed
+              elsewhere in the deploy path.
+    """
+    args = _build_parser().parse_args(argv)
 
     rpc = args.rpc_url or os.environ.get("RPC_URL") or ELYSIUM_TESTNET_RPC_DEFAULT
     print(f"RPC: {rpc}")
@@ -209,8 +234,12 @@ def main():
         chain_id = args.chain_id or ELYSIUM_TESTNET_CHAIN_ID
         web3 = None
     else:
-        from web3 import Web3
-        web3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 30}))
+        if provider is not None:
+            # Injected Web3 instance (test hook). Do NOT rebuild it.
+            web3 = provider
+        else:
+            from web3 import Web3
+            web3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 30}))
         chain_id = args.chain_id or web3.eth.chain_id
         print(f"Connected. chainId={chain_id}")
 
@@ -241,9 +270,17 @@ def main():
     manifest = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "chain_id": chain_id,
+        "chainId": chain_id,
         "rpc_url": rpc,
         "dry_run": args.dry_run,
+        "asset": args.asset,
+        "keeper": args.keeper,
+        "timelock_seconds": args.timelock_seconds,
+        "timelockSeconds": args.timelock_seconds,
+        "weights": weights,
+        "leg_addrs": args.leg_addr,
         "contracts": deploys,
+        "contractAddresses": [c.get("address") for c in deploys],
     }
 
     out = args.out or (PROJECT_ROOT / "output" / "deployments" /
@@ -251,13 +288,10 @@ def main():
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     # Strip ABIs from the manifest to keep it small (they're reproducible from solc).
-    manifest_out = {
-        "timestamp": manifest["timestamp"],
-        "chain_id": manifest["chain_id"],
-        "rpc_url": manifest["rpc_url"],
-        "dry_run": manifest["dry_run"],
-        "contracts": [{k: v for k, v in c.items() if k != "abi"} for c in deploys],
-    }
+    manifest_out = dict(manifest)
+    manifest_out["contracts"] = [
+        {k: v for k, v in c.items() if k != "abi"} for c in deploys
+    ]
     out.write_text(json.dumps(manifest_out, indent=2), encoding="utf-8")
     print(f"\nDeployment manifest: {out}")
     return 0
