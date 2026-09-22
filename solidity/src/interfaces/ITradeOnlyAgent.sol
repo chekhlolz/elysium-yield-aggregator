@@ -17,9 +17,16 @@ interface ITradeOnlyAgent {
     struct Delegation {
         address keeper;
         uint256[] assetIds;    // empty array = all assets
-        uint256 maxNotional;   // total USD notional this keeper can trade (6 decimals)
+        /// Per-venue notional cap. The verifier tracks `usedNotional`
+        /// keyed by (venue, delegator, keeper, nonce), so a single
+        /// delegation used on N venues has an effective ceiling of
+        /// N × maxNotional. This is a known limitation — see the
+        /// "Per-venue notional cap" entry in docs/DELEGATION_SPEC.md §9.
+        uint256 maxNotional;   // USD per venue (6 decimals)
         uint256 maxPerOrder;   // USD per single order (6 decimals)
-        uint64  expiresAt;     // unix ts; 0 = never
+        /// Unix ts; 0 = never expires. The verifier short-circuits on
+        /// `d.expiresAt == 0` and treats that as "no expiry".
+        uint64  expiresAt;
         uint64  nonce;         // user-chosen for ordering / de-duplication
         bytes32  salt;         // user-chosen for uniqueness
     }

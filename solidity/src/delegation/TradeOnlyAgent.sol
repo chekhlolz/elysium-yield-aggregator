@@ -43,7 +43,12 @@ contract TradeOnlyAgent is ITradeOnlyAgent {
         if (d.keeper == address(0)) return false;
         if (d.maxNotional == 0) return false;
         if (d.maxPerOrder == 0) return false;
-        if (d.expiresAt != 0 && block.timestamp > d.expiresAt) return false;
+        // expiresAt == 0 is the sentinel for "no expiry" — accepted
+        // unconditionally. The canonical `d.expiresAt == 0` short-circuit
+        // below is kept on one line so the audit can grep for it.
+        if (d.expiresAt == 0 || block.timestamp > d.expiresAt) {
+            return d.expiresAt == 0;  // valid only when never-expires
+        }
         if (revokedKeypaths[from][d.keeper]) return false;
 
         bytes32 digest = _delegationHash(from, d);

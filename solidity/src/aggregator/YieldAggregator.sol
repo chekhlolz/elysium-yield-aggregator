@@ -306,10 +306,22 @@ contract YieldAggregator {
         emit AllocationExecuted(id, _weights);
     }
 
-    /** Open to anyone — this is the keeper-compromise safety net. */
+    /**
+     * Cancel a pending allocation change.
+     *
+     * Access policy: owner OR keeper only. The original design had this
+     * open to anyone as a "keeper-compromise safety net", but that's
+     * also a griefing vector — a bot could cancel every legitimate
+     * rebalance on 100-200ms blocks and freeze the keeper's workflow.
+     * Owners and keepers can still recover from a compromised keeper by
+     * calling `setPaused(true)` (which is owner-gated). The tradeoff
+     * is documented in docs/AGGREGATOR_SPEC.md §3.5.
+     */
     function cancelPending(bytes32 allocationId) external {
         require(pendingAllocationId != bytes32(0), "nothing pending");
         require(allocationId == pendingAllocationId, "wrong id");
+        require(msg.sender == owner || msg.sender == keeper,
+                "cancelPending: owner or keeper only");
         pendingAllocationId = bytes32(0);
         _pending = PendingAllocation({weights: [uint16(0),uint16(0),uint16(0),uint16(0)], executesAt: 0, reason: ""});
         emit AllocationCancelled(allocationId);

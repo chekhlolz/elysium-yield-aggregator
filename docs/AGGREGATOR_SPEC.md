@@ -53,7 +53,7 @@ Three Elysium-native advantages that HyperEVM cannot match:
 │  │  RegimeDetector (read-only on-chain)               │   │
 │  │    - reads HyperCore market-data precompile        │   │
 │  │    - emits FundRegimeUpdated(regime, ts)           │   │
-│  │    - regimes: FUNGING_STRONG / FUNDING_WEAK /      │   │
+│  │    - regimes: FUNDING_STRONG / FUNDING_WEAK /      │   │
 │  │              FUNDING_NEG / HIGH_VOL                 │   │
 │  └────────────────────────────────────────────────────┘   │
 │                                                            │
@@ -81,38 +81,70 @@ Three Elysium-native advantages that HyperEVM cannot match:
 
 ### 3.1 `YieldAggregator.sol` — ERC-4626 vault
 
+The implementation (`solidity/src/aggregator/YieldAggregator.sol`) follows
+canonical ERC-4626 signatures. The reference interface is in
+`solidity/src/interfaces/IYieldAggregator.sol`:
+
 ```solidity
 interface IYieldAggregator {
-    struct Share {
-        address owner;
-        uint256 amount;
-    }
-    function shares(address) external view returns (uint256);
+    // ---- ERC-20 accounting ----
+    function asset() external view returns (address);          // USDC 6 decimals
     function totalAssets() external view returns (uint256);
-    function asset() external view returns (address);   // always USDC (or HYPE)
-    function deposit(uint256 shares, address receiver) external returns (uint256);
-    function withdraw(uint256 assets, address receiver, address owner) external returns (uint256);
+    function totalShares() external view returns (uint256);
+    function shares(address owner) external view returns (uint256);
+    function convertToShares(uint256 assets) external view returns (uint256);
+    function convertToAssets(uint256 shares) external view returns (uint256);
+
+    // ---- Canonical ERC-4626 ----
+    function deposit(uint256 assets, address receiver) external returns (uint256 shares);
+    function mint(uint256 shares, address receiver) external returns (uint256 assets);
+    function withdraw(uint256 assets, address receiver, address owner) external returns (uint256 shares);
+    function redeem(uint256 shares, address receiver, address owner) external returns (uint256 assets);
+
+    // ---- ERC-4626 previews ----
     function previewDeposit(uint256 assets) external view returns (uint256);
-    function previewWithdraw(uint256 shares) external view returns (uint256);
+    function previewMint(uint256 shares) external view returns (uint256);
+    function previewWithdraw(uint256 assets) external view returns (uint256);
+    function previewRedeem(uint256 shares) external view returns (uint256);
 
-    // Regime-driven allocation (keeper triggers, timelocked)
-    event AllocationChanged(Regime regime, uint256[4] weights, uint64 executedAt);
+    // ---- Current regime state ----
+    function currentApyBps() external view returns (uint256);
+    function weights() external view returns (uint16[4] memory);   // bps, sum = 10000
+    function legsView() external view returns (address[4] memory);
+    function legAt(uint256 i) external view returns (address);
+    function totalLegValue() external view returns (uint256);
 
-    struct Regime {
-        address spotVault;   // IYieldLeg
-        address khypeVault;  // IYieldLeg
-        address perpKeeper;  // IYieldLeg
-        address basisHedge;  // IYieldLeg
-        uint8[] weights;     // [0..10000], sum = 10000
-    }
-    function allocate(Regime calldata regime) external;
+    // ---- Pending allocation (keeper + timelock) ----
+    function pendingAllocationId() external view returns (bytes32);
+    function requestAllocation(uint16[4] calldata newWeights, string calldata reason)
+        external returns (bytes32 allocationId);
+    function executePending() external;        // open, after timelock
+    function cancelPending(bytes32 allocationId) external;  // owner OR keeper
+
+    // ---- Yield harvesting ----
+    function harvestFromAllLegs() external;    // keeper-gated
+
+    // ---- Governance ----
+    function setPaused(bool _paused) external;
+    function setKeeper(address _keeper) external;
+    function setTimelock(uint32 _timelockSeconds) external;
 }
 ```
 
-- **ERC-4626** share accounting so any frontend can display APY without bespoke math.
-- **Regime** is a tuple: 4 legs + 4 weight buckets (0..10000 basis points).
-- `allocate` is called by keeper; it computes dollar allocation, calls each leg's `allocateTo`, and emits `AllocationChanged`.
-- Allocation changes are **timelocked** (default 5 min) — see §3.5.
+- **ERC-4626** share accounting so any frontend can display APY without
+  bespoke math. `preview*` values equal the would-be return values
+  because the exchange rate is computed from `totalAssets / totalShares`
+  and there is no fee layer.
+- **Regime** is NOT a Solidity struct — it's the tuple `(IYieldLeg[4],
+  uint16[4] weights)`. Weights are in basis points, each `uint16`,
+  summing to `BPS_DENOM = 10_000`.
+- Allocation changes are requested via `requestAllocation(newWeights,
+  reason)` by the keeper; they execute on-chain via `executePending()`
+  once the timelock has elapsed (default 86 400 s = 24h; tunable).
+  See §3.5 for the two-speed framing (weights slow / execution fast).
+- `cancelPending()` is owner-or-keeper only. The original design had it
+  open to anyone as a keeper-compromise safety net; that turned out to
+  be a griefing vector — see §3.5.
 
 ### 3.2 `IYieldLeg.sol` — abstraction for each yield source
 
@@ -170,13 +202,51 @@ Regime thresholds:
 
 Thresholds are tunable via governance; defaults above are the `hypeback` sensitivity-sweep winners (see README).
 
-### 3.5 Keeper + timelock
+### 3.5 Keeper + timelock — two-speed framing
 
 ```
-keeper (relayer) → allocate(regime) → aggregator timelock (5 min) → execute
+KEEPER  ──►  requestAllocation(newWeights)      [gated: keeper only]
+             │   pendingAllocationId = keccak(sender, executesAt, weights, block)
+             │
+             ▼
+AGGREGATOR  ──►  timelock (default 86 400 s = 24 h)
+             │   AllocationRequested event
+             │
+             ▼
+ANYONE    ──►  executePending()                  [open, after timelock]
+             │   - distributes / reduces across legs at the new weights
+             │   - AllocationExecuted event
+             │
+OWNER/KEEPER ──► cancelPending(allocationId)     [gated: owner OR keeper]
+                  - aborts a pending change
+                  - AllocationCancelled event
 ```
 
-The 5-minute timelock is a safety net against keeper compromise. During the timelock, `cancelPending()` can be called by any address (or via governance) to abort a malicious allocation.
+**Two-speed framing.** The aggregator has two decision loops with very
+different latencies, and the +0.5–1% "fast rebalance" alpha is the
+second loop, not the first:
+
+- **Slow loop (weights, timelocked).** `requestAllocation` → 24 h →
+  `executePending` moves capital between legs. This is where the
+  5-minute-timelock-vs-100ms-blocks concern was raised; the real
+  default is 24 h, not 5 min, and the timelock exists to let a
+  compromised keeper's allocation be reviewed before it settles.
+- **Fast loop (execution within current weights).** Inside a given
+  weight vector, the keeper can `harvestFromAllLegs()` at any time,
+  legs can re-open / re-close perp positions within their existing
+  allocation, and the ElysiumCoreWriter settles each action in
+  100–200 ms. This is where the alpha comes from — the keeper reacts
+  to funding ticks without waiting for a weight change.
+
+**`cancelPending` access policy.** Originally open to anyone as a
+keeper-compromise safety net. That turned out to be a griefing vector
+— a bot could cancel every legitimate rebalance on 100-200ms blocks
+and freeze the keeper's workflow indefinitely. Now owner-or-keeper
+only. Recovery path for a compromised keeper: owner calls
+`setPaused(true)` (halts all allocation + harvest paths) and then
+`setKeeper(newKeeper)`. The tradeoff is explicit: griefing protection
+wins over permissionless abort; a single compromised keeper can still
+be stopped, just not by an unrelated third party.
 
 ## 4. Alpha sources (vs Liminal xHYPE 14.50% live APY)
 
@@ -224,14 +294,14 @@ The current delta-neutral baseline (HR=1.0, Lev=3) clears this at 13.28% APY / 0
 |---|---|---|
 | 0 | mainnet launch | `YieldAggregator.sol`, `IYieldLeg.sol`, `RegimeDetector.sol` deployed to Elysium mainnet |
 | 1 | +4 weeks (precompiles ship) | 4 leg contracts live; aggregator in "observe-only" mode |
-| 2 | +8 weeks | Timelock shortened from 5 min → 30s after 30d no-incident |
+| 2 | +8 weeks | Timelock shortened from 24 h → 1 h after 30 d no-incident |
 | 3 | +12 weeks | Governance enables (Tally + snapshot), keeper becomes open |
 
 ## 7. Risks & mitigations
 
 | Risk | Mitigation |
 |---|---|
-| Keeper gets compromised | 5-min timelock + `cancelPending()` from any address |
+| Keeper gets compromised | 24h allocation timelock + `cancelPending()` gated to owner/keeper + `setPaused(true)` then `setKeeper(newKeeper)` as owner-only recovery |
 | Precompile latency spike | Fallback to stale state (regime only updates when fresh data arrives) |
 | kHYPE unstake > 9d blocks rebalance | Keep 10% of vault always in HYPE spot for liquidity |
 | Funding regime flips within 100ms window | RegimeDetector uses 24h EMA, not instantaneous rate |

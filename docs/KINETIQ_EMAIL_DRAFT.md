@@ -73,11 +73,11 @@ not the +3–5% we'd like to claim.
 **Solidity reference implementation is compiled** (solc 0.8.26, 0 errors,
 0 warnings):
 
-- `YieldAggregator.sol` — ERC-4626 vault, 12.3 KB bytecode, keeper + timelock + open cancelPending
+- `YieldAggregator.sol` — ERC-4626 vault, 12.4 KB bytecode, keeper + timelock + role-gated `cancelPending` (owner or keeper only)
 - `RegimeDetector.sol` — market-data precompile adapter, 2.5 KB
 - `TradeOnlyAgent.sol` — EIP-712 trade delegation, 2.8 KB
-- 3 interfaces (`IYieldAggregator`, `IYieldLeg`, `ITradeOnlyAgent`)
-- 4 leg contracts specified but not yet implemented (they implement `IYieldLeg`)
+- 4 leg contracts implemented (KHYPELeg, SpotStakingLeg, PerpFundingLeg, BasisHedgeLeg) — 25 KB combined
+- 10 interfaces (`IYieldAggregator`, `IYieldLeg`, `ITradeOnlyAgent`, `IERC20Router`, `IStakingPool`, `IElysiumCoreWriter`, `IPriceOracle`, `IFundingSource`, `IMarketDataFeed`, `IERC20Minimal`)
 
 **Dev tooling also in the repo** (open-source, MIT):
 
@@ -127,7 +127,7 @@ Not asking for:
 
 ### What we can commit to
 
-- Testnet deployment on chainId 99801 within 2 weeks of precompile landing.
+- Testnet deployment on the Elysium chain ID Kinetiq publishes at launch, within 2 weeks of precompile landing.
 - Full mainnet deployment within 6 weeks of precompile landing.
 - Public Foundry test suite for both contracts, in the same repo, before
   mainnet.

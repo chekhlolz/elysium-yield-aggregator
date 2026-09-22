@@ -122,18 +122,21 @@ python scripts/deploy.py --dry-run \
 Real deploy:
 
 ```bash
-export RPC_URL=https://testnet-rpc.elysium.kinetiq.xyz
+export RPC_URL=<Elysium testnet RPC>  # published by Kinetiq at launch
 export DEPLOYER_PK=0x...
 python scripts/deploy.py --leg-addr <leg1> --leg-addr <leg2> \
   --leg-addr <leg3> --leg-addr <leg4>
 ```
 
-Real deploy refuses any chain ID other than the testnet placeholder
-(99801) without `--yes-i-mean-it` AND an explicit `--chain-id`. It also
-explicitly refuses chainId 999, which is **HyperEVM's** mainnet ID, not
-Elysium's — Elysium's own chain ID is published by Kinetiq at mainnet
-launch and has not been confirmed yet. Manifests land at
-`solidity/output/deployments/`.
+Real deploy refuses any chain ID other than the internal dry-run
+placeholder (see `ELYSIUM_TESTNET_CHAIN_ID` in
+`solidity/scripts/deploy.py`, used only for local `MockProvider` tests)
+without `--yes-i-mean-it` AND an explicit `--chain-id`. It also
+explicitly refuses chainId 999, which is **HyperEVM's** mainnet ID,
+not Elysium's — Elysium's own mainnet and testnet chain IDs are **TBA**
+and will be published by Kinetiq at launch. The placeholder exists so
+the deploy script has something to dry-run against before the real
+IDs land. Manifests land at `solidity/output/deployments/`.
 
 Contracts (21 total, 0 errors, 2 warnings). The four `IYieldLeg` impl
 contracts (KHYPELeg, SpotStakingLeg, PerpFundingLeg, BasisHedgeLeg)
@@ -141,8 +144,8 @@ landed this week — see `docs/ROADMAP.md §2.1`:
 
 | File | Bytes | ABI entries |
 |---|---|---|
-| `src/aggregator/YieldAggregator.sol` | 12,408 | 46 |
-| `src/delegation/TradeOnlyAgent.sol` | 2,839 | 8 |
+| `src/aggregator/YieldAggregator.sol` | 12,539 | 46 |
+| `src/delegation/TradeOnlyAgent.sol` | 2,864 | 8 |
 | `src/keeper/RegimeDetector.sol` | 2,523 | 11 |
 | `src/legs/KHYPELeg.sol` | 6,843 | 26 |
 | `src/legs/SpotStakingLeg.sol` | 6,852 | 27 |

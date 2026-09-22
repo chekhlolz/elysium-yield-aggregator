@@ -98,9 +98,19 @@ NOT mainnet-ready.
   placeholder (`0x...C0DE`). Kinetiq needs to publish the actual
   ArbOS precompile slot for the market-data read.
 
-- **Chain spec confirmation** — chainId 999 for mainnet, 99801 for
-  testnet. If these change, `deploy.py --chain-id` and the
-  `ELYSIUM_*` constants in `hypercore.py` need updating.
+- **Chain spec confirmation** — Elysium's mainnet chain ID and testnet
+  chain ID are **NOT published yet**. Kinetiq's official docs
+  (`elysium.kinetiq.xyz/docs/building-on-elysium`) state that "the chain
+  ID, public RPC endpoints, block explorer, testnet, and faucet will be
+  published at launch". Note: `chainId 999` is **HyperEVM mainnet**, not
+  Elysium — these contracts must be deployed to Elysium, not HyperEVM.
+  The placeholder value in `deploy.py` / `hypercore.py` is an
+  internal dry-run convention, not a real chain ID. When Kinetiq
+  publishes the real IDs:
+    1. Update `ELYSIUM_MAINNET_CHAIN_ID` in `hypeback/hypercore.py`.
+    2. Update `ELYSIUM_TESTNET_CHAIN_ID` in `solidity/scripts/deploy.py`.
+    3. Re-run the deploy harness regression test against `anvil --chain-id <new>`.
+    4. Update `deploy.py`'s refusal guard to include the new mainnet ID.
 
 - **ElysiumCoreWriter predeploy address** — not shipped; can't wire it in.
 
