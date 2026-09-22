@@ -39,7 +39,9 @@ library SafeERC20 {
  *     IYieldLeg. The aggregator treats them as opaque.
  *   - Allocation weights are basis points (sum = 10_000). Keeper sets them
  *     through requestAllocation + executePending with a configurable
- *     timelock. cancelPending is open to anyone (keeper compromise safety).
+ *     timelock. cancelPending is owner-or-keeper only — see
+ *     docs/AGGREGATOR_SPEC.md §3.5 for the tradeoff against the
+ *     original "open to anyone" keeper-compromise design.
  *
  * Not mainnet-audited. Reference implementation for the Elysium builder
  * proposal; production will add governance, accounting snapshots, leg
@@ -63,6 +65,20 @@ contract YieldAggregator {
     address public keeper;
     address public owner;
     bool public paused;
+
+    // ---- Reentrancy guard (round-3 fix, 2026-09-23) ----
+    // Every function that moves assets out of the vault to legs
+    // (deposit / mint / withdraw / redeem / executePending /
+    // harvestFromAllLegs) calls into an external leg contract that
+    // could call back into the aggregator. The legs are not audited
+    // and are treated as untrusted. CCE-based guard.
+    uint8 private _locked = 1;
+    modifier nonReentrant() {
+        require(_locked == 1, "reentrancy");
+        _locked = 2;
+        _;
+        _locked = 1;
+    }
 
     struct PendingAllocation {
         uint16[4] weights;
@@ -187,7 +203,7 @@ contract YieldAggregator {
     }
 
     // ---- Deposit / mint ----
-    function deposit(uint256 assets, address receiver) external notPaused returns (uint256) {
+    function deposit(uint256 assets, address receiver) external notPaused nonReentrant returns (uint256) {
         require(assets > 0, "zero deposit");
         uint256 newShares = convertToShares(assets);
         require(newShares > 0, "dust shares");
@@ -204,7 +220,7 @@ contract YieldAggregator {
         return newShares;
     }
 
-    function mint(uint256 newShares, address receiver) external notPaused returns (uint256) {
+    function mint(uint256 newShares, address receiver) external notPaused nonReentrant returns (uint256) {
         require(newShares > 0, "zero shares");
         uint256 assets = convertToAssets(newShares);
         require(assets > 0, "dust assets");
@@ -223,7 +239,7 @@ contract YieldAggregator {
 
     // ---- Withdraw / redeem ----
     function withdraw(uint256 assets, address receiver, address _owner)
-        external notPaused returns (uint256)
+        external notPaused nonReentrant returns (uint256)
     {
         require(assets > 0, "zero withdrawal");
         uint256 newShares = convertToShares(assets);
@@ -244,7 +260,7 @@ contract YieldAggregator {
     }
 
     function redeem(uint256 newShares, address receiver, address _owner)
-        external notPaused returns (uint256)
+        external notPaused nonReentrant returns (uint256)
     {
         require(newShares > 0, "zero redeem");
         uint256 assets = convertToAssets(newShares);
@@ -278,7 +294,7 @@ contract YieldAggregator {
         return id;
     }
 
-    function executePending() external {
+    function executePending() external nonReentrant {
         require(pendingAllocationId != bytes32(0), "nothing pending");
         require(block.timestamp >= _pending.executesAt, "not yet");
 
@@ -328,7 +344,7 @@ contract YieldAggregator {
     }
 
     // ---- Harvest all legs into vault cash. ----
-    function harvestFromAllLegs() external onlyKeeper {
+    function harvestFromAllLegs() external onlyKeeper nonReentrant {
         for (uint i = 0; i < 4; i++) legs[i].harvest();
         uint256 newAlloc = 0;
         for (uint i = 0; i < 4; i++) newAlloc += legs[i].currentValue();

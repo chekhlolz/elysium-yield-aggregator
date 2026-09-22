@@ -34,6 +34,15 @@ contract KHYPELeg is IYieldLeg {
     uint256 public constant BPS_DENOM = 10_000;
     uint256 public constant MAX_HISTORY = 16;
 
+    // Round-3 reentrancy guard — router/pool are external and untrusted.
+    uint8 private _locked = 1;
+    modifier nonReentrant() {
+        require(_locked == 1, "reentrancy");
+        _locked = 2;
+        _;
+        _locked = 1;
+    }
+
     modifier onlyOwner() { require(msg.sender == owner, "not owner"); _; }
 
     address public immutable owner;
@@ -112,7 +121,7 @@ contract KHYPELeg is IYieldLeg {
         return v;
     }
 
-    function allocateTo(uint256 amount) external returns (uint256) {
+    function allocateTo(uint256 amount) external nonReentrant returns (uint256) {
         require(msg.sender == owner, "not owner");
         require(amount > 0, "zero");
 
@@ -129,7 +138,7 @@ contract KHYPELeg is IYieldLeg {
     }
 
     /** kHYPE accrues through exchange rate — no claim(); only USDC sweep. */
-    function harvest() external {
+    function harvest() external nonReentrant {
         require(msg.sender == owner, "not owner");
         uint256 u = usdc.balanceOf(address(this));
         if (u > 0) {
@@ -140,7 +149,7 @@ contract KHYPELeg is IYieldLeg {
         _recordApy(expectedApy());
     }
 
-    function reduceFrom(uint256 amount) external returns (uint256 returnedUsd) {
+    function reduceFrom(uint256 amount) external nonReentrant returns (uint256 returnedUsd) {
         require(msg.sender == owner, "not owner");
         require(amount > 0 && khypeBalance >= amount, "bad amount");
 
@@ -165,7 +174,7 @@ contract KHYPELeg is IYieldLeg {
     // ---- Owner helpers ----
 
     /** Sweep unbonded HYPE and swap to USDC. */
-    function claimPending(uint256 amount) external onlyOwner {
+    function claimPending(uint256 amount) external onlyOwner nonReentrant {
         if (amount == 0) return;
         uint256 hypeOut = pool.creditUnbonded(address(this), amount, address(this));
         if (hypeOut > 0) {

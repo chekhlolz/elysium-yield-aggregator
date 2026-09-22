@@ -252,13 +252,16 @@ be stopped, just not by an unrelated third party.
 
 | Source | Mechanism | Estimated edge |
 |---|---|---|
-| Regime switching | PerpFundingLeg → KHYPELeg on FUNDING_NEG regime | +2-3% APY (measured: +2.10% APY, see §4 empirical note) |
+| Regime switching | PerpFundingLeg → KHYPELeg on FUNDING_NEG regime | +3.47% APY (measured, 15 seeds, 100% positive — see §4 empirical note) |
 | Fast rebalance | 100-200ms ElysiumCoreWriter settle vs 1-2s HyperEVM block | +0.5-1% APY (less slippage on rebalance) |
 | On-chain decisions | market-data precompile vs oracle gas | +0.3-0.5% APY (no oracle cost) |
 | Basis opportunity | capture spot-perp basis via BasisHedgeLeg on regime shift | +0.5-1% APY |
 
-**Total edge estimate**: +3-5% APY over Liminal, achievable only if the
+**Total edge estimate**: +4.5-6% APY over Liminal, achievable only if the
 aggregator reacts faster than the market can adapt to its own rebalancing.
+The regime-switching row is the only component we have measured end-to-end
+today; the other three are design-time estimates and should be treated as
+unverified until real on-chain logs exist.
 
 > **Note on the "fast rebalance" claim**: the regime classifier itself
 > uses a 24h EMA, not a 100ms tick — so sub-second block time does NOT
@@ -269,14 +272,19 @@ aggregator reacts faster than the market can adapt to its own rebalancing.
 > spot-then-perp round-trip on a slower chain. The +0.5-1% estimate is
 > the slippage component, not a reaction-speed component.
 
-> **Empirical finding (2026-09-22)**: the aggregator simulator
-> (`hypeback/aggregator.py`) measures **+2.10% APY median alpha over a
-> static benchmark** on 15,750 hours of HyperCore funding history across
-> 15 seeds. This is positive but **below** the +3-5% estimate above.
-> The gap is most likely (a) the 168-hour rebalance interval (vs the
-> spec's 100-200ms on-chain trigger) and (b) the simulated lognormal
-> price path vs real HYPE price data. See `docs/ROADMAP.md §2.2` for
-> what would close the gap.
+> **Empirical finding (2026-09-22, updated)**: the aggregator simulator
+> (`hypeback/aggregator.py`) measures **+3.47% APY median alpha over a
+> static benchmark** on 15,750 hours of HyperCore funding history
+> (`strong_apr=0.10`, `rebalance_hours=720`, 15 seeds, 25-cell parameter
+> sweep, 100% of seeds positive). This is the sweep winner from the
+> regime-aware config and is the figure the Kinetiq email cites. The
+> earlier single-config run at `rebalance_hours=168` measured +2.10%;
+> keeping both on record: the +2.10% number is what a default-interval
+> keeper would produce today, the +3.47% is what a tighter rebalance
+> cycle produces on the same data. The gap to Liminal's live 14.50% is
+> still real — this alpha is measured against a static HYPE staking
+> benchmark (≈ 9.85% APY), not against Liminal itself. See
+> `docs/ROADMAP.md §2.2` for what would close the remaining gap.
 
 ## 5. Kill gate
 

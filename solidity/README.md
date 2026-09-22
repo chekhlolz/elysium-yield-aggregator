@@ -58,13 +58,13 @@ Fresh build stats (source of truth; regenerate with `python scripts/compile.py`)
 
 ```
 contract                  abi  creation B  deployed B
-YieldAggregator            46       12539       11358
-TradeOnlyAgent              8        2864        2836
-RegimeDetector             11        2523        2343
-KHYPELeg                   26        6843        6278
-SpotStakingLeg             27        6852        6287
-PerpFundingLeg             32        7466        6850
-BasisHedgeLeg              33        7209        6640
+YieldAggregator            46       11848       13048
+TradeOnlyAgent              8        2839        2811
+RegimeDetector             13        2650        2926
+KHYPELeg                   26        6560        7137
+SpotStakingLeg             27        6569        7146
+PerpFundingLeg             32        7085        7713
+BasisHedgeLeg              33        6875        7456
 SafeERC20                   0         135          85  (library)
 RegimeId                    0         135          85  (enum)
 IYieldAggregator           27           0           0
@@ -108,7 +108,7 @@ preview methods are required by ERC-4626).
 - **`harvestFromAllLegs`** is keeper-gated and pulls realized yield from
   each leg back into vault cash.
 
-### RegimeDetector (2.5 KB bytecode)
+### RegimeDetector (2.7 KB bytecode)
 
 - Reads HyperCore market data through the `IMarketDataFeed` interface
   (the adapter for the Elysium market-data precompile — see spec §2).
@@ -154,13 +154,13 @@ mock-friendly dependency interface. See `docs/ROADMAP.md §5` for the
 
 | Contract | Creation B | Deployed B | Purpose |
 |---|---:|---:|---|
-| YieldAggregator | 12 539 | 11 358 | Vault + keeper + timelock |
+| YieldAggregator | 11 848 | 13 048 | Vault + keeper + timelock |
 | TradeOnlyAgent | 2 864 | 2 836 | EIP-712 delegation |
-| RegimeDetector | 2 523 | 2 343 | Market-data adapter |
-| KHYPELeg | 6 843 | 6 278 | kHYPE LST leg |
-| SpotStakingLeg | 6 852 | 6 287 | Spot-staking leg |
-| PerpFundingLeg | 7 466 | 6 850 | Perp-funding leg |
-| BasisHedgeLeg | 7 209 | 6 640 | Basis-hedge leg |
+| RegimeDetector | 2 650 | 2 926 | Market-data adapter |
+| KHYPELeg | 6 560 | 7 137 | kHYPE LST leg |
+| SpotStakingLeg | 6 569 | 7 146 | Spot-staking leg |
+| PerpFundingLeg | 7 085 | 7 713 | Perp-funding leg |
+| BasisHedgeLeg | 6 875 | 7 456 | Basis-hedge leg |
 
 Total: **~46.5 KB** across all contracts (including the `SafeERC20`
 library and `RegimeId` enum). Per-contract, the largest is

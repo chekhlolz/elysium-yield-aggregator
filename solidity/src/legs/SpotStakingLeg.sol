@@ -35,6 +35,15 @@ contract SpotStakingLeg is IYieldLeg {
     ///      typically ~24h. Documentation / test upper bound only.
     uint256 public constant UNBONDING_PERIOD = 24 * 3600;
 
+    // Round-3 reentrancy guard — pool/router are external and untrusted.
+    uint8 private _locked = 1;
+    modifier nonReentrant() {
+        require(_locked == 1, "reentrancy");
+        _locked = 2;
+        _;
+        _locked = 1;
+    }
+
     modifier onlyOwner() { require(msg.sender == owner, "not owner"); _; }
 
     address public immutable owner;
@@ -112,7 +121,7 @@ contract SpotStakingLeg is IYieldLeg {
         return v;
     }
 
-    function allocateTo(uint256 amount) external returns (uint256) {
+    function allocateTo(uint256 amount) external nonReentrant returns (uint256) {
         require(msg.sender == owner, "not owner");
         require(amount > 0, "zero");
 
@@ -128,7 +137,7 @@ contract SpotStakingLeg is IYieldLeg {
     }
 
     /** Direct staking accrues via exchange rate — no claim(); sweep only. */
-    function harvest() external {
+    function harvest() external nonReentrant {
         require(msg.sender == owner, "not owner");
         uint256 u = usdc.balanceOf(address(this));
         if (u > 0) {
@@ -139,7 +148,7 @@ contract SpotStakingLeg is IYieldLeg {
         _recordApy(expectedApy());
     }
 
-    function reduceFrom(uint256 amount) external returns (uint256 returnedUsd) {
+    function reduceFrom(uint256 amount) external nonReentrant returns (uint256 returnedUsd) {
         require(msg.sender == owner, "not owner");
         require(amount > 0 && rewardHypeBalance >= amount, "bad amount");
 
@@ -164,7 +173,7 @@ contract SpotStakingLeg is IYieldLeg {
     // ---- Owner helpers ----
 
     /** Sweep unbonded HYPE and swap to USDC. */
-    function claimPending(uint256 amount) external onlyOwner {
+    function claimPending(uint256 amount) external onlyOwner nonReentrant {
         if (amount == 0) return;
         uint256 hypeOut = pool.creditUnbonded(address(this), amount, address(this));
         if (hypeOut > 0) {

@@ -9,3 +9,10 @@ build/
 .env
 server.log
 solidity/output/
+
+# Foundry / forge
+forge-cache/
+cache/
+out/
+solidity/out/
+lib/

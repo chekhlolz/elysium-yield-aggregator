@@ -1,0 +1,20 @@
+[profile.default]
+src = "solidity/src"
+out = "solidity/out"
+test = "solidity/test"
+libs = ["lib"]
+solc = "0.8.26"
+evm_version = "paris"
+optimizer = true
+optimizer_runs = 200
+remappings = [
+    "@forge-std/=lib/forge-std/src/",
+]
+
+[profile.default.fuzz]
+runs = 256
+
+[profile.default.invariant]
+runs = 32
+depth = 16
+fail_on_revert = false

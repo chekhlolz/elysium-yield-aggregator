@@ -61,19 +61,37 @@ contract RegimeDetector {
     }
 
     address public immutable marketDataFeed;
+    address public immutable owner;
     Thresholds public thresholds;
     RegimeSnapshot public lastSnapshot;
 
     event RegimeUpdated(uint8 indexed regime, uint256 fundingApyBps, uint64 ts);
+    event ThresholdsUpdated(uint256 strongApyBps, uint256 weakApyBps, uint256 highVolBps);
+
+    modifier onlyOwner() { require(msg.sender == owner, "not owner"); _; }
 
     constructor(address _marketDataFeed) {
+        require(_marketDataFeed != address(0), "zero feed");
         marketDataFeed = _marketDataFeed;
+        owner = msg.sender;
         thresholds = Thresholds(800, 300, 9000);
     }
 
-    function setThresholds(Thresholds calldata t) external {
-        // TODO: ownership / governance check — placeholder.
+    /**
+     * Change the regime classification thresholds.
+     *
+     * Owner-only. The original implementation was open to anyone, which
+     * was a real griefing vector — a random caller could set
+     * `strongApyBps = 0` and force every observation to classify as
+     * FUNDING_STRONG, which pushes 60% of vault assets into perp
+     * funding. Compromising thresholds would then silently steer
+     * allocation without triggering the aggregator's role gate on
+     * `requestAllocation`. Round-3 fix, 2026-09-23.
+     */
+    function setThresholds(Thresholds calldata t) external onlyOwner {
+        require(t.strongApyBps >= t.weakApyBps, "bad threshold order");
         thresholds = t;
+        emit ThresholdsUpdated(t.strongApyBps, t.weakApyBps, t.highVolBps);
     }
 
     /**

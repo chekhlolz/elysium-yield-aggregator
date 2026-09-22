@@ -68,12 +68,15 @@ NOT mainnet-ready.
 
 ### 2.2 Simulation (blocker for Kinetiq conversation)
 
-- **Aggregator alpha vs Liminal xHYPE** — the sim shows +2.10% APY alpha
-  over a static benchmark (which is itself a 9.85% APY strategy). Liminal
-  xHYPE is 14.50% live APY. **The aggregator does NOT currently beat
-  Liminal in simulation** — this is an honest finding that needs to be in
-  the Kinetiq conversation. The +3-5% claim in `AGGREGATOR_SPEC.md` is
-  aspirational; the +2.1% figure is what the model produces today.
+- **Aggregator alpha vs Liminal xHYPE** — the sim shows **+3.47% APY
+  median alpha** over a static HYPE-staking benchmark (which is itself a
+  9.85% APY strategy) after a 25-cell regime-aware parameter sweep
+  (`strong_apr=0.10`, `rebalance_hours=720`, 15 seeds, 100% positive).
+  Liminal xHYPE is 14.50% live APY. **The aggregator does NOT currently
+  beat Liminal in simulation** — this is an honest finding that needs to
+  be in the Kinetiq conversation. The +4.5-6% total-edge estimate in
+  `AGGREGATOR_SPEC.md §4` is aspirational; the +3.47% figure is what the
+  model produces today on the best-tuned config.
 
   **What would close the gap**:
   - Real hourly HYPE price data (not simulated lognormal) to see if xHYPE
@@ -116,29 +119,56 @@ NOT mainnet-ready.
 
 ### 2.4 Testing
 
-- **Foundry tests** — forge is not installed on this machine. The
-  Solidity contracts compile but have no EVM-level tests. When forge is
-  available:
-  - Test `YieldAggregator` ERC-4626 accounting edge cases.
-  - Test `TradeOnlyAgent` EIP-712 signature recovery.
-  - Test `RegimeDetector` with mocked market-data feed.
+- **Foundry tests** — forge installed 2026-09-22 (v1.8.3, in
+  `~/.foundry/bin/`). Round-3 smoke suite in place:
+  - `solidity/test/RegimeDetector.t.sol` — 16 tests (constructor,
+    setThresholds owner-gating, priority chain, fuzz invariant, weight
+    sums).
+  - `solidity/test/YieldAggregator.t.sol` — 28 tests (ERC-4626 happy
+    path, cancelPending owner/keeper-only, reentrancy guard, weight
+    sum, executePending timelock, governance).
+  - `solidity/test/TradeOnlyAgent.t.sol` — 19 tests (EIP-712 signature
+    recovery, expiresAt == 0 never-expires sentinel, per-venue
+    notional cap, revoke, tampered/wrong-signer rejection).
+  - Total: **63 tests, 0 failed**. Run with `forge test`.
+  - External verifier (`check_repo.py`) still ignores `solidity/test/`
+    because it runs solc directly without forge-std remapping — that
+    path is covered by `forge test`.
 
 - **`verify.py` covers ABI + EIP-712 + events**, but not runtime
-  behavior. The aggregator's `_redeem` path in particular has edge cases
-  (share allowance, first depositor, dust) that static analysis can't
-  catch.
+  behavior. The aggregator's `_redeem` path in particular has edge
+  cases (share allowance, first depositor, dust) that static analysis
+  can't catch.
+
+### 2.5 Known issues (round-3 P2, not blocking M1)
+
+The round-3 review caught 6 findings that don't touch correctness in
+the current test-suite surface but will bite at production scale.
+These are documented here so they're not lost between sessions:
+
+| # | Issue | Where | Status |
+|---|---|---|---|
+| KI-1 | Stake legs (`KHYPELeg`, `SpotStakingLeg`) mix unit domains: `khypeBalance` is tracked in HYPE, but `amount` and `allocatedUsd` are in USDC. `currentValue()` multiplies by price to reconcile, but `_distribute` and `reduceFrom` return USDC — leg-internal accounting may drift when the oracle re-prices HYPE. | `src/legs/KHYPELeg.sol`, `src/legs/SpotStakingLeg.sol` | Documented; needs oracle-priced pro-rata on every `allocateTo` / `reduceFrom`. |
+| KI-2 | `writer.openPosition(...)` / `closePosition(...)` in every leg is called with `_zeroSig()` — a placeholder signature that will always fail on a real `ElysiumCoreWriter`. Production flow needs `submitIntent(Delegation, Signature, uint256)` on each leg. | All 4 legs | TODO, listed in §5; production blocker for M2. |
+| KI-3 | `BasisHedgeLeg.allocateTo(1)` double-allocates: with `spotPortion = 1 / 2 = 0`, the `if (spotPortion == 0) spotPortion = amount;` guard re-runs with `perpPortion = amount - spotPortion = 0`, but the code then still calls `_writeOpen` once, so 1 USDC of allocation creates both a spot and perp open with notional 0. | `src/legs/BasisHedgeLeg.sol` | Edge case; add `require(amount >= 2, "dust")` guard. |
+| KI-4 | `setFixedApyBps(v)` on all 4 legs writes `fixedApyBps` but doesn't refresh `latestApyBps`. Until the next `harvest()` or `allocateTo()` runs, `expectedApy()` continues returning the stale `latestApyBps`. | All 4 legs | Add `latestApyBps = v;` to `setFixedApyBps` when `fundingSource` is not live. |
+| KI-5 | `_allocatedTotal` in `YieldAggregator` decrements by `delta` on `executePending`'s reduce path, but `legs[i].reduceFrom(delta)` may return less than `delta` (unstake waiting, rounding). The accounting is optimistic — vault's share balances can exceed `_allocatedTotal + freeCash` on a slow leg. | `src/aggregator/YieldAggregator.sol` | Track actual returned amount from `reduceFrom`, not the target. |
+| KI-6 | `recordExecution` in `TradeOnlyAgent` accepts a `notional` up to the delegation's `maxNotional`, but the venue-local `usedNotional` cap is per-`(venue, delegator, keeper, nonce)` — a delegation signed once can be used on N venues for a total of N × maxNotional. This is documented in `DELEGATION_SPEC.md §9`; production will add a per-delegation aggregate cap if cross-venue abuse becomes realistic. | `src/delegation/TradeOnlyAgent.sol` | Accepted limitation; not a bug, just a spec tradeoff. |
 
 ## 3. Kinetiq conversation
 
 **Send this when**: the aggregator sim produces alpha >= 0 on the real
-funding dataset. Currently: +2.1% median alpha over 15 seeds. Positive
-but below the +3-5% claim in `AGGREGATOR_SPEC.md`.
+funding dataset. Currently: **+3.47% APY median alpha** over a static
+benchmark (25-cell sweep winner, 15 seeds, 100% positive) — still
+below Liminal xHYPE's live 14.50%, which is the honest framing in the
+draft.
 
 **Send this to**: the `builders` allocation channel mentioned in
 `docs/KINETIQ_EMAIL_DRAFT.md`. Include:
 - The `hypeback` repo (this directory).
 - `docs/AGGREGATOR_SPEC.md` and `docs/DELEGATION_SPEC.md`.
-- A note that the alpha figure is +2.1% (empirical), not +3-5% (target).
+- A note that the alpha figure is +3.47% APY (empirical, sweep winner),
+  not the +4.5-6% total-edge estimate in `AGGREGATOR_SPEC.md §4`.
 
 **Ask for**:
 1. The precompile address + spec.

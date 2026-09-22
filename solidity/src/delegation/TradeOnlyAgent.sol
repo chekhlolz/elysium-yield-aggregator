@@ -43,12 +43,19 @@ contract TradeOnlyAgent is ITradeOnlyAgent {
         if (d.keeper == address(0)) return false;
         if (d.maxNotional == 0) return false;
         if (d.maxPerOrder == 0) return false;
-        // expiresAt == 0 is the sentinel for "no expiry" — accepted
-        // unconditionally. The canonical `d.expiresAt == 0` short-circuit
-        // below is kept on one line so the audit can grep for it.
-        if (d.expiresAt == 0 || block.timestamp > d.expiresAt) {
-            return d.expiresAt == 0;  // valid only when never-expires
-        }
+        // FIX-21 (round-3 P0): `expiresAt == 0` is the "no expiry"
+        // sentinel and must NOT short-circuit the rest of validation.
+        // The previous shape
+        //   if (d.expiresAt == 0 || block.timestamp > d.expiresAt) {
+        //       return d.expiresAt == 0;
+        //   }
+        // returned `true` for any never-expires delegation regardless of
+        // revocation state or signature validity — a delegator who
+        // revoked a keeper could not stop that keeper from acting under
+        // pre-existing never-expires delegations. The expired check is
+        // now the only early-out on `expiresAt`; revocation and
+        // signature are always evaluated.
+        if (d.expiresAt != 0 && block.timestamp > d.expiresAt) return false;
         if (revokedKeypaths[from][d.keeper]) return false;
 
         bytes32 digest = _delegationHash(from, d);

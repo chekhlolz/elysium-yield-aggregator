@@ -45,6 +45,15 @@ contract BasisHedgeLeg is IYieldLeg {
     /// TODO: confirm with Kinetiq before mainnet.
     uint256 public constant HYPE_ASSET_ID = 1;
 
+    // Round-3 reentrancy guard — writer/router are external and untrusted.
+    uint8 private _locked = 1;
+    modifier nonReentrant() {
+        require(_locked == 1, "reentrancy");
+        _locked = 2;
+        _;
+        _locked = 1;
+    }
+
     modifier onlyOwner() { require(msg.sender == owner, "not owner"); _; }
 
     address public immutable owner;
@@ -137,7 +146,7 @@ contract BasisHedgeLeg is IYieldLeg {
         return spotVal + perpVal + usdc.balanceOf(address(this));
     }
 
-    function allocateTo(uint256 amount) external returns (uint256) {
+    function allocateTo(uint256 amount) external nonReentrant returns (uint256) {
         require(msg.sender == owner, "not owner");
         require(amount > 0, "zero");
 
@@ -166,7 +175,7 @@ contract BasisHedgeLeg is IYieldLeg {
      * Flip-close the short to lock in basis PnL (USDC credited by
      * writer), then sweep it to the aggregator.
      */
-    function harvest() external {
+    function harvest() external nonReentrant {
         require(msg.sender == owner, "not owner");
 
         uint256 usdcBefore = usdc.balanceOf(address(this));
@@ -188,7 +197,7 @@ contract BasisHedgeLeg is IYieldLeg {
         _recordApy(expectedApy());
     }
 
-    function reduceFrom(uint256 amount) external returns (uint256 returnedUsd) {
+    function reduceFrom(uint256 amount) external nonReentrant returns (uint256 returnedUsd) {
         require(msg.sender == owner, "not owner");
         require(amount > 0, "zero");
         require(amount <= allocatedUsd, "overreduce");
