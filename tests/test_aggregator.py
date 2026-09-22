@@ -110,6 +110,26 @@ class TestAggregatorSimulation(unittest.TestCase):
         self.assertGreater(r["total_yield_accrued"], -1e6,
                            "total_yield is catastrophically negative")
 
+    def test_default_config_alpha_positive(self):
+        """The tuned default (strong_apr=0.10, rebalance_hours=720) should
+        produce positive alpha with only 3 seeds.
+
+        The sweep (scripts/sweep_regime.py) shows this config at +3.47%
+        median alpha with 5 seeds on the full 15750h history, and the
+        per-seed spread is tiny (alpha_min ~= alpha_max ~= +3.47%), so 3
+        seeds is more than enough for a deterministic assertion. This is
+        the "+3-5% APY alpha" claim from docs/AGGREGATOR_SPEC.md pinned
+        to the retuned defaults.
+        """
+        m = multi_seed_aggregator_simulation(num_seeds=3, funding=self.funding)
+        self.assertGreater(m["alpha_median"], 0.0,
+                           f"default-config alpha_median was "
+                           f"{m['alpha_median']*100:+.3f}%, expected > 0")
+        # Every one of the 3 seeds must also be positive (no flakiness).
+        self.assertGreater(m["alpha_min"], 0.0,
+                           f"default-config alpha_min was "
+                           f"{m['alpha_min']*100:+.3f}%, expected > 0")
+
 
 class TestAggregatorEdgeCases(unittest.TestCase):
     def test_zero_funding_history(self):

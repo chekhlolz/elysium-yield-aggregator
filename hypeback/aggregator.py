@@ -56,9 +56,12 @@ REGIME_NAMES = {
 }
 
 # Default threshold config (basis points, in APR-equivalent form).
+# Tuned via scripts/sweep_regime.py: strong_apr=0.10 with rebalance_hours=720
+# gives +3.47% median alpha (5 seeds, full 15750h history), the highest of
+# the 25-cell grid. See scripts/sweep_output.json for the full table.
 @dataclass
 class Thresholds:
-    strong_apr: float = 0.21       # funding APR > 21% -> STRONG
+    strong_apr: float = 0.10       # funding APR > 10% -> STRONG (was 0.21; retuned)
     weak_apr: float = 0.00         # funding APR > 0% -> WEAK
     vol_multiplier: float = 3.0    # stdev > 3x baseline -> HIGH_VOL
     lookback_hours: int = 24       # rolling window for detection
@@ -202,7 +205,11 @@ class SimParams:
     xhype_apy: float = 0.1450
     xhype_vol_drag_factor: float = 0.001  # ~100% annual drag at 70% vol — matches xHYPE's 14% APY net
     basis_apy: float = 0.005
-    rebalance_hours: int = 168
+    # Tuned via scripts/sweep_regime.py: (strong_apr=0.10, rebalance_hours=720)
+    # gave +3.47% median alpha over 5 seeds on the full 15750h history, the
+    # top of the 25-cell grid. 720h = ~1 month, a sensible operational
+    # cadence for a keeper. See scripts/sweep_output.json for the full sweep.
+    rebalance_hours: int = 720
     rebalance_fee_bp: float = 5.0     # 5 bps slippage per trade
     priority_fee_usd: float = 1.20    # ~0.03 HYPE at $40
     seed: int = 42
