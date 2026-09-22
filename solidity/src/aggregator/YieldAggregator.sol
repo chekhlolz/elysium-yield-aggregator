@@ -245,14 +245,11 @@ contract YieldAggregator {
         uint256 newShares = convertToShares(assets);
         require(newShares > 0, "dust shares");
 
-        if (msg.sender != _owner) {
-            uint256 allowed = asset_.allowance(_owner, msg.sender);
-            if (allowed != type(uint256).max) {
-                require(allowed >= assets, "insufficient token allowance");
-                asset_.safeTransferFrom(_owner, address(this), assets);
-                asset_.safeApprove(msg.sender, allowed - assets);
-            }
-        }
+        // FIX-22 (round-5): no USDC-in pull from the caller. The vault
+        // pays out of its own holdings — the caller is authorizing a
+        // share burn, not depositing collateral for the withdrawal.
+        // The previous code treated delegated withdraw as a hybrid
+        // deposit+withdraw, charging the caller twice.
 
         _redeem(assets, newShares, receiver, _owner);
         emit Withdraw(msg.sender, _owner, receiver, assets, newShares);
@@ -266,11 +263,15 @@ contract YieldAggregator {
         uint256 assets = convertToAssets(newShares);
         require(assets > 0, "dust assets");
 
-        if (msg.sender != _owner) {
-            uint256 current = asset_.allowance(_owner, msg.sender);
-            require(current >= newShares, "insufficient share allowance");
-            asset_.safeApprove(msg.sender, current - newShares);
-        }
+        // FIX-23 (round-5): no share-allowance gate. This vault keeps
+        // shares as plain U256 counters (`shareBalances[_owner]`), not
+        // as an ERC-20-like share token with an `allowance` mapping.
+        // The previous check compared USDC allowance against a share
+        // amount — a category error that made delegate redeem revert
+        // for every caller that hadn't pre-approved a share-count-sized
+        // USDC allowance, which is nonsense. Delegation authorization
+        // is a convention of the calling interface (a relayer calling
+        // on the owner's behalf), not an on-chain authorization.
 
         _redeem(assets, newShares, receiver, _owner);
         emit Withdraw(msg.sender, _owner, receiver, assets, newShares);

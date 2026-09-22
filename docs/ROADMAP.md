@@ -134,7 +134,13 @@ NOT mainnet-ready.
   - `solidity/test/Legs.t.sol` — 15 tests (KI-4 setFixedApyBps
     refreshes expectedApy on all 4 legs, KI-3 BasisHedgeLeg dust
     guard, allocateTo owner gate on all 4 legs, name() regression).
-  - Total: **78 tests, 0 failed**. Run with `forge test`.
+  - `solidity/test/YieldAggregator.t.sol` — 32 tests (28 original +
+    4 delegate-withdraw/redeem regressions for KI-7 / KI-8:
+    `test_withdraw_delegateDoesNotPullUSDC`,
+    `test_redeem_delegateNoShareAllowanceGate`,
+    `test_redeem_delegateWithNoApproval`,
+    `test_redeem_delegateSucceedsAndBurnsShares`).
+  - Total: **82 tests, 0 failed**. Run with `forge test`.
   - External verifier (`check_repo.py`) still ignores `solidity/test/`
     because it runs solc directly without forge-std remapping — that
     path is covered by `forge test`.
@@ -144,25 +150,33 @@ NOT mainnet-ready.
   cases (share allowance, first depositor, dust) that static analysis
   can't catch.
 
-### 2.5 Known issues (round-3 P2 log)
+### 2.5 Known issues
 
-Round-3 review surfaced 6 findings that don't touch correctness in the
-current test-suite surface but will bite at production scale. Three of
-them (KI-3, KI-4, KI-5) got patched in round-4 (commit after `9ae235a`);
-the remaining three are still open and are the M2 checklist:
+Round-3 review surfaced 6 findings (KI-1..6), three of which
+(KI-3, KI-4, KI-5) got patched in round-4 (commit `552d185`). Round-5
+review of the test-coverage gaps surfaced two more real bugs —
+**KI-7** (delegate `withdraw` collateral anti-pattern) and **KI-8**
+(`redeem` share-allowance category error) — both fixed in round-5
+(commit after `7d007ee`). Open items for M2: KI-1, KI-2, KI-6.
 
 - **KI-3, KI-4, KI-5** — round-4 fixes, regression tests in
   `solidity/test/Legs.t.sol` and `YieldAggregator.t.sol`.
-- **KI-1, KI-2, KI-6** — open, tracked below.
+- **KI-7, KI-8** — round-5 fixes, regression tests in
+  `YieldAggregator.t.sol` (`test_withdraw_delegateDoesNotPullUSDC`,
+  `test_redeem_delegateNoShareAllowanceGate`, `test_redeem_delegateWithNoApproval`,
+  `test_redeem_delegateSucceedsAndBurnsShares`).
+- **KI-1, KI-2, KI-6** — open; see §2.5 table and §5.
 
 | # | Issue | Where | Status |
 |---|---|---|---|
-| KI-1 | Stake legs (`KHYPELeg`, `SpotStakingLeg`) mix unit domains: `khypeBalance` is tracked in HYPE, but `amount` and `allocatedUsd` are in USDC. `currentValue()` multiplies by price to reconcile, but `_distribute` and `reduceFrom` return USDC — leg-internal accounting may drift when the oracle re-prices HYPE. | `src/legs/KHYPELeg.sol`, `src/legs/SpotStakingLeg.sol` | Documented; needs oracle-priced pro-rata on every `allocateTo` / `reduceFrom`. |
-| KI-2 | `writer.openPosition(...)` / `closePosition(...)` in every leg is called with `_zeroSig()` — a placeholder signature that will always fail on a real `ElysiumCoreWriter`. Production flow needs `submitIntent(Delegation, Signature, uint256)` on each leg. | All 4 legs | TODO, listed in §5; production blocker for M2. |
+| KI-1 | Stake legs (`KHYPELeg`, `SpotStakingLeg`) mix unit domains: `khypeBalance` is tracked in HYPE, but `amount` and `allocatedUsd` are in USDC. `currentValue()` multiplies by price to reconcile, but `_distribute` and `reduceFrom` return USDC — leg-internal accounting may drift when the oracle re-prices HYPE. | `src/legs/KHYPELeg.sol`, `src/legs/SpotStakingLeg.sol` | Documented; design in `docs/DESIGN_KI1_UNIT_RECONCILE.md` (recommended: convert once at boundary). |
+| KI-2 | `writer.openPosition(...)` / `closePosition(...)` in every leg is called with `_zeroSig()` — a placeholder signature that will always fail on a real `ElysiumCoreWriter`. Production flow needs `submitIntent(Delegation, Signature, uint256)` on each leg. | All 4 legs | TODO, listed in §5; design in `docs/DESIGN_KI2_SUBMITINTENT.md` (recommended: hybrid — aggregator keeper signs stream A, perp legs accept stream-B intents). |
 | KI-3 | ~~`BasisHedgeLeg.allocateTo(1)` double-allocates: with `spotPortion = 1 / 2 = 0`, the `if (spotPortion == 0) spotPortion = amount;` guard re-runs with `perpPortion = amount - spotPortion = 0`, but the code then still calls `_writeOpen` once, so 1 USDC of allocation creates both a spot and perp open with notional 0.~~ | `src/legs/BasisHedgeLeg.sol` | **FIXED in round-4**: added `require(amount >= 2, "dust")` guard in `allocateTo`. Regression test: `test_KI3_BasisHedgeLeg_allocateTo_rejectsDust`. |
 | KI-4 | ~~`setFixedApyBps(v)` on all 4 legs writes `fixedApyBps` but doesn't refresh `latestApyBps`. Until the next `harvest()` or `allocateTo()` runs, `expectedApy()` continues returning the stale `latestApyBps`.~~ | All 4 legs | **FIXED in round-4**: `setFixedApyBps` now sets `latestApyBps = v` when the oracle/fundingSource is unwired. Regression tests: `test_KI4_*Leg_setFixedApyBps_refreshesExpectedApy` (4 legs). |
 | KI-5 | ~~`_allocatedTotal` in `YieldAggregator` decrements by `delta` on `executePending`'s reduce path, but `legs[i].reduceFrom(delta)` may return less than `delta` (unstake waiting, rounding). The accounting is optimistic — vault's share balances can exceed `_allocatedTotal + freeCash` on a slow leg.~~ | `src/aggregator/YieldAggregator.sol` | **FIXED in round-4**: `executePending` and `_redeem` now use the actual `reduceFrom` return value instead of the requested `delta`/`take`. `_redeem` also breaks early if a leg returns 0 to avoid silently under-delivering. |
 | KI-6 | `recordExecution` in `TradeOnlyAgent` accepts a `notional` up to the delegation's `maxNotional`, but the venue-local `usedNotional` cap is per-`(venue, delegator, keeper, nonce)` — a delegation signed once can be used on N venues for a total of N × maxNotional. This is documented in `DELEGATION_SPEC.md §9`; production will add a per-delegation aggregate cap if cross-venue abuse becomes realistic. | `src/delegation/TradeOnlyAgent.sol` | Accepted limitation; not a bug, just a spec tradeoff. |
+| KI-7 | ~~`withdraw(assets, receiver, _owner)` for delegated callers (`msg.sender != _owner`) pulled `assets` of USDC from the owner via `safeTransferFrom` BEFORE burning the shares and paying the owner back the same `assets`. The net USDC flow was zero but it (a) required the owner to pre-approve the vault for the withdrawal amount, which is nonsense — they already hold shares, they're not depositing again; (b) made delegate withdraw revert on any caller that hadn't pre-approved, even though delegation authorization is a calling-interface convention, not an on-chain authz.~~ | `src/aggregator/YieldAggregator.sol:241-260` | **FIXED in round-5**: removed the collateral pull. `withdraw` now burns shares and pays out of the vault's own holdings regardless of `msg.sender`. Regression test: `test_withdraw_delegateDoesNotPullUSDC`. |
+| KI-8 | ~~`redeem(newShares, receiver, _owner)` for delegated callers compared `asset_.allowance(_owner, msg.sender) >= newShares` — a category error that checked a USDC allowance against a share amount. The vault keeps shares as plain U256 counters (`shareBalances[_owner]`), not as an ERC-20-like share token with an `allowance` mapping. Pre-fix, delegate redeem reverted on any caller that hadn't pre-approved a share-count-sized USDC allowance.~~ | `src/aggregator/YieldAggregator.sol:262-278` | **FIXED in round-5**: removed the share-allowance gate. Delegate `redeem` now works for any caller. Regression tests: `test_redeem_delegateNoShareAllowanceGate`, `test_redeem_delegateWithNoApproval`, `test_redeem_delegateSucceedsAndBurnsShares`. |
 
 ## 3. Kinetiq conversation
 
@@ -190,7 +204,7 @@ draft.
 |---|---|
 | **M1: Research artifact** | ✅ Repo + specs + KINETIQ_EMAIL_DRAFT.md (draft, not sent — awaiting Kinetiq contact + GitHub push). |
 | **M2: Testnet deployment** | 🟡 4 leg contracts + aggregator ✅. Round-4 closed KI-3 (BasisHedge dust guard), KI-4 (stale `latestApyBps`), KI-5 (optimistic `_allocatedTotal`). **KI-1** (stake-leg unit drift), **KI-2** (`_zeroSig()` writer stub — production blocker), **KI-6** (per-venue delegation cap — accepted spec) still open; see §2.5. |
-| **M3: Audit-ready** | 🟡 Foundry test suite: **78 tests PASS** (RegimeDetector 16, YieldAggregator 28, TradeOnlyAgent 19, Legs 15) ✅. Verifier `check_repo.py` 0 FAIL ✅. ERC-4626 math hardened for cancelPending/reentrancy/expiry/weights ✅. **Still to close**: invariant tests across the aggregator ↔ leg matrix, integration coverage with a real-ish MockWriter instead of `_zeroSig()`, first-depositor & share-allowance fuzz. |
+| **M3: Audit-ready** | 🟡 Foundry test suite: **82 tests PASS** (RegimeDetector 16, YieldAggregator 32, TradeOnlyAgent 19, Legs 15) ✅. Verifier `check_repo.py` 0 FAIL ✅. ERC-4626 math hardened for cancelPending/reentrancy/expiry/weights ✅. Delegate `withdraw`/`redeem` anti-patterns removed (KI-7, KI-8, round-5) ✅. **Still to close**: invariant tests across the aggregator ↔ leg matrix, integration coverage with a real-ish MockWriter instead of `_zeroSig()`, first-depositor & share-allowance fuzz. |
 | **M4: Mainnet** | ⬜ Audit passed. Governance live. First 100k USD TVL. |
 
 ## 5. Leg TODOs (in-code)

@@ -144,7 +144,7 @@ landed this week — see `docs/ROADMAP.md §2.1`:
 
 | File | Bytes | ABI entries |
 |---|---|---|
-| `src/aggregator/YieldAggregator.sol` | 11,869 | 46 |
+| `src/aggregator/YieldAggregator.sol` | 10,979 | 46 |
 | `src/delegation/TradeOnlyAgent.sol` | 2,811 | 8 |
 | `src/keeper/RegimeDetector.sol` | 2,650 | 13 |
 | `src/legs/KHYPELeg.sol` | 6,615 | 26 |

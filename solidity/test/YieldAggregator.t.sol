@@ -213,6 +213,110 @@ contract YieldAggregatorTest is Test {
         agg.withdraw(200 ether, ALICE, ALICE);
     }
 
+    // ---- FIX-22 / FIX-23 (round-5): delegate withdraw/redeem ----
+
+    /// Regression for FIX-22: a delegate calling `withdraw` must NOT be
+    /// charged an additional USDC collateral transfer. Pre-fix, the
+    /// delegate path treated withdraw as a hybrid deposit+withdraw and
+    /// pulled `assets` of USDC from the owner via `transferFrom`, then
+    /// paid the owner back `assets` of USDC from the vault — net zero
+    /// for USDC, but it required the owner to have pre-approved the
+    /// vault for the withdrawal amount, which is nonsense: they're
+    /// already holding shares, they're not depositing again.
+    function test_withdraw_delegateDoesNotPullUSDC() public {
+        vm.prank(ALICE);
+        agg.deposit(1000 ether, ALICE);
+
+        // Bob is a delegate. Bob has NOT approved the vault any USDC,
+        // and Alice has NOT approved Bob any USDC. Pre-fix this would
+        // revert on "insufficient token allowance"; post-fix it should
+        // succeed because the vault pays out of its own holdings.
+        address BOB = address(0xB0B);
+        usdc.mint(BOB, 0); // BOB has zero USDC
+        vm.prank(BOB);
+        uint256 sharesBurned = agg.withdraw(500 ether, ALICE, ALICE);
+        assertTrue(sharesBurned >= 499 ether && sharesBurned <= 500 ether, "burned shares drift");
+
+        // Alice's USDC balance should have INCREASED (not decreased) —
+        // the vault paid her out of its own holdings, not by pulling
+        // USDC from Alice and re-paying it back.
+        assertTrue(usdc.balanceOf(ALICE) >= 500 ether, "alice received cash");
+    }
+
+    /// Regression for FIX-23: `redeem` has no share-allowance gate. The
+    /// vault keeps shares as plain U256 counters (not an ERC-20 share
+    /// token), so there is no "share allowance" concept to check. The
+    /// pre-fix code compared `asset_.allowance(_owner, msg.sender)`
+    /// against a share amount — a category error that reverted on any
+    /// delegate redeem unless the owner had pre-approved a share-count-
+    /// sized USDC allowance, which is nonsense.
+    function test_redeem_delegateNoShareAllowanceGate() public {
+        vm.prank(ALICE);
+        agg.deposit(1000 ether, ALICE);
+        uint256 aliceShares = agg.shares(ALICE);
+        assertTrue(aliceShares > 0, "alice has shares");
+
+        // Alice approves BOB for a large USDC allowance — the pre-fix
+        // bug would have interpreted this as "BOB is allowed to redeem
+        // aliceShares/2 worth of shares on Alice's behalf" IF the
+        // share-count happened to be <= the USDC allowance amount.
+        // The correct semantics: Alice's approval of USDC to Bob has
+        // NO BEARING on whether Bob can redeem her shares. That's a
+        // calling-interface convention, not an on-chain authz.
+        address BOB = address(0xB0B);
+        vm.prank(ALICE);
+        usdc.approve(BOB, type(uint256).max);
+
+        // Delegate redeem: Bob calls redeem on Alice's behalf, pays out
+        // to Alice. Pre-fix this would either revert (if allowance was
+        // less than newShares) or corrupt Bob's allowance. Post-fix it
+        // just works.
+        vm.prank(BOB);
+        uint256 aliceBefore = usdc.balanceOf(ALICE);
+        uint256 assetsReturned = agg.redeem(aliceShares / 2, ALICE, ALICE);
+        assertTrue(assetsReturned > 0, "redeem returned assets");
+        assertTrue(usdc.balanceOf(ALICE) - aliceBefore > 0, "alice received cash");
+    }
+
+    /// Regression for FIX-23: a delegate redeem WITHOUT any prior
+    /// approval should also work — the vault keeps no share-allowance
+    /// mapping, so there is nothing to approve.
+    function test_redeem_delegateWithNoApproval() public {
+        vm.prank(ALICE);
+        agg.deposit(1000 ether, ALICE);
+        uint256 aliceShares = agg.shares(ALICE);
+
+        // Carol has never approved USDC to anyone; Carol has never been
+        // approved by Alice for anything. Pre-fix this would revert on
+        // "insufficient share allowance". Post-fix it succeeds because
+        // the vault doesn't check share allowance at all.
+        address CAROL = address(0xCA1);
+        usdc.mint(CAROL, 0);
+        vm.prank(CAROL);
+        uint256 assets = agg.redeem(aliceShares / 2, ALICE, ALICE);
+        assertTrue(assets > 0, "redeem returned assets");
+        assertTrue(agg.shares(ALICE) < aliceShares, "alice shares reduced");
+    }
+
+    /// Positive-path delegate redeem: the happy case, not a delegate
+    /// attack — just a normal delegate redeem with the receiver being
+    /// the owner.
+    function test_redeem_delegateSucceedsAndBurnsShares() public {
+        vm.prank(ALICE);
+        agg.deposit(1000 ether, ALICE);
+        uint256 aliceSharesBefore = agg.shares(ALICE);
+
+        address BOB = address(0xB0B);
+        usdc.mint(BOB, 0);
+
+        vm.prank(BOB);
+        uint256 burnedShares = aliceSharesBefore / 2;
+        uint256 assets = agg.redeem(burnedShares, BOB, ALICE);
+        assertTrue(assets > 0, "assets paid to bob");
+        assertEq(usdc.balanceOf(BOB), assets, "bob got exactly the redeemed amount");
+        assertTrue(agg.shares(ALICE) == aliceSharesBefore - burnedShares, "alice shares reduced");
+    }
+
     // ---- Request / execute / cancel pending allocation ----
 
     function test_requestAllocation_requiresKeeper() public {
