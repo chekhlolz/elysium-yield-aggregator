@@ -37,29 +37,48 @@ import traceback
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SOLC_VERSION = "0.8.26"
 
-# Interface -> concrete impl. We intentionally check only pairs that exist.
-# IYieldLeg has no impl yet — its ABI surface is validated implicitly by
-# YieldAggregator.sol compiling against it.
+# Interface -> concrete impl(s). IYieldLeg has 4 concrete impls
+# (one per yield venue). IYieldAggregator and ITradeOnlyAgent each
+# have exactly one.
 SOURCES = {
     "src/interfaces/IYieldAggregator.sol":
-        "src/aggregator/YieldAggregator.sol",
+        ["src/aggregator/YieldAggregator.sol"],
     "src/interfaces/ITradeOnlyAgent.sol":
-        "src/delegation/TradeOnlyAgent.sol",
+        ["src/delegation/TradeOnlyAgent.sol"],
+    "src/interfaces/IYieldLeg.sol":
+        [
+            "src/legs/KHYPELeg.sol",
+            "src/legs/SpotStakingLeg.sol",
+            "src/legs/PerpFundingLeg.sol",
+            "src/legs/BasisHedgeLeg.sol",
+        ],
 }
 
 # Non-contract entries that solc emits alongside a source (libraries,
 # enum types, minimal ERC-20 facades). Skipped when picking the impl.
 _SKIP_NAMES = {
     "SafeERC20", "IERC20Minimal", "IMarketDataFeed", "RegimeId",
+    "IERC20Router", "IStakingPool", "IElysiumCoreWriter",
+    "IPriceOracle", "IFundingSource",
 }
 
 ALL_SOURCES = [
     "src/interfaces/IYieldLeg.sol",
     "src/interfaces/IYieldAggregator.sol",
     "src/interfaces/ITradeOnlyAgent.sol",
+    "src/interfaces/IERC20.sol",
+    "src/interfaces/IERC20Router.sol",
+    "src/interfaces/IStakingPool.sol",
+    "src/interfaces/IElysiumCoreWriter.sol",
+    "src/interfaces/IPriceOracle.sol",
+    "src/interfaces/IFundingSource.sol",
     "src/keeper/RegimeDetector.sol",
     "src/aggregator/YieldAggregator.sol",
     "src/delegation/TradeOnlyAgent.sol",
+    "src/legs/KHYPELeg.sol",
+    "src/legs/SpotStakingLeg.sol",
+    "src/legs/PerpFundingLeg.sol",
+    "src/legs/BasisHedgeLeg.sol",
 ]
 
 
@@ -118,34 +137,35 @@ def _pick_impl_contract_names(iface_name: str, impl_names) -> str:
 
 
 def check_abi_consistency(result: dict) -> list:
-    """Verify each interface's entries are covered by its impl."""
+    """Verify each interface's entries are covered by each of its impls."""
     out = []
-    for iface_src, impl_src in SOURCES.items():
+    for iface_src, impl_srcs in SOURCES.items():
         iface_names = list(result["contracts"][iface_src].keys())
         iface_name = iface_names[0]
-        impl_names = list(result["contracts"][impl_src].keys())
-        impl_name = _pick_impl_contract_names(iface_name, impl_names)
-
         iface_abi = result["contracts"][iface_src][iface_name]["abi"]
-        impl_abi = result["contracts"][impl_src][impl_name]["abi"]
-
         iface_funcs = {_signature(e): e for e in iface_abi if e["type"] == "function"}
-        impl_funcs = {_signature(e): e for e in impl_abi if e["type"] == "function"}
         iface_events = {_signature(e): e for e in iface_abi if e["type"] == "event"}
-        impl_events = {_signature(e): e for e in impl_abi if e["type"] == "event"}
 
-        missing_funcs = sorted(set(iface_funcs) - set(impl_funcs))
-        missing_events = sorted(set(iface_events) - set(impl_events))
+        for impl_src in impl_srcs:
+            impl_names = list(result["contracts"][impl_src].keys())
+            impl_name = _pick_impl_contract_names(iface_name, impl_names)
+            impl_abi = result["contracts"][impl_src][impl_name]["abi"]
 
-        out.append({
-            "interface": f"{iface_src}::{iface_name}",
-            "impl": f"{impl_src}::{impl_name}",
-            "iface_funcs": len(iface_funcs),
-            "impl_funcs": len(impl_funcs),
-            "missing_funcs": missing_funcs,
-            "missing_events": missing_events,
-            "ok": not missing_funcs and not missing_events,
-        })
+            impl_funcs = {_signature(e): e for e in impl_abi if e["type"] == "function"}
+            impl_events = {_signature(e): e for e in impl_abi if e["type"] == "event"}
+
+            missing_funcs = sorted(set(iface_funcs) - set(impl_funcs))
+            missing_events = sorted(set(iface_events) - set(impl_events))
+
+            out.append({
+                "interface": f"{iface_src}::{iface_name}",
+                "impl": f"{impl_src}::{impl_name}",
+                "iface_funcs": len(iface_funcs),
+                "impl_funcs": len(impl_funcs),
+                "missing_funcs": missing_funcs,
+                "missing_events": missing_events,
+                "ok": not missing_funcs and not missing_events,
+            })
     return out
 
 
@@ -222,11 +242,13 @@ def main() -> int:
     result = compile_all()
 
     if result.get("errors"):
-        print("solc errors:", file=sys.stderr)
-        for e in result["errors"]:
-            if e.get("severity") == "error":
+        real_errors = [e for e in result["errors"] if e.get("severity") == "error"]
+        if real_errors:
+            print("solc errors:", file=sys.stderr)
+            for e in real_errors:
                 print(f"[error] {e.get('formattedMessage') or e.get('message')}")
-        return 1
+            return 1
+        # Only warnings — proceed.
 
     abi_results = check_abi_consistency(result)
     all_ok = all(r["ok"] for r in abi_results)

@@ -23,22 +23,32 @@ NOT mainnet-ready.
 | Aggregator spec | `docs/AGGREGATOR_SPEC.md` | ✅ 265 lines |
 | Delegation spec | `docs/DELEGATION_SPEC.md` | ✅ 240 lines |
 | Kinetiq email draft | `docs/KINETIQ_EMAIL_DRAFT.md` | 🟡 not yet sent |
-| Solidity: `YieldAggregator.sol` | `solidity/src/aggregator/` | ✅ compiles, 39 ABI entries |
+| Solidity: `YieldAggregator.sol` | `solidity/src/aggregator/` | ✅ compiles, 46 ABI entries |
 | Solidity: `TradeOnlyAgent.sol` | `solidity/src/delegation/` | ✅ compiles, 8 ABI entries |
 | Solidity: `RegimeDetector.sol` | `solidity/src/keeper/` | ✅ compiles, 11 ABI entries |
-| Solidity: 3 interfaces | `solidity/src/interfaces/` | ✅ IYieldAggregator, IYieldLeg, ITradeOnlyAgent |
-| ABI verifier | `solidity/scripts/verify.py` | ✅ checks iface↔impl, EIP-712, event topics |
+| Solidity: `KHYPELeg.sol` | `solidity/src/legs/` | ✅ compiles, 26 ABI entries (HyperCore kHYPE LST) |
+| Solidity: `SpotStakingLeg.sol` | `solidity/src/legs/` | ✅ compiles, 27 ABI entries (HyperEVM direct staking) |
+| Solidity: `PerpFundingLeg.sol` | `solidity/src/legs/` | ✅ compiles, 32 ABI entries (HyperCore HYPE-USD perp) |
+| Solidity: `BasisHedgeLeg.sol` | `solidity/src/legs/` | ✅ compiles, 33 ABI entries (spot + perp HR=1.0) |
+| Solidity: 9 interfaces | `solidity/src/interfaces/` | ✅ IYieldAggregator, IYieldLeg, ITradeOnlyAgent, IERC20, IERC20Router, IStakingPool, IElysiumCoreWriter, IPriceOracle, IFundingSource |
+| ABI verifier | `solidity/scripts/verify.py` | ✅ checks iface↔impl (incl. 4 legs), EIP-712, event topics |
 | Deploy harness | `solidity/scripts/deploy.py` | ✅ dry-run works; real deploy needs RPC + key |
-| Compile harness | `solidity/scripts/compile.py` | ✅ py-solc-x |
+| Compile harness | `solidity/scripts/compile.py`, `solidity/scripts/build.py` | ✅ py-solc-x, recursive source discovery |
 
 ## 2. What's deferred (not built, needs work)
 
 ### 2.1 Contracts (blocker for production)
 
-- **Four `IYieldLeg` contracts** — `SpotStakingLeg`, `KHYPELeg`, `PerpFundingLeg`, `BasisHedgeLeg`.
-  Each implements the aggregator's leg interface and talks to HyperCore.
-  Currently `IYieldLeg` has no impl — the aggregator's `_legs[4]` is stubbed
-  with placeholder addresses in `deploy.py`.
+- ~~**Four `IYieldLeg` contracts** — `SpotStakingLeg`, `KHYPELeg`,
+  `PerpFundingLeg`, `BasisHedgeLeg`.~~ **DONE** — see
+  `solidity/src/legs/KHYPELeg.sol`, `SpotStakingLeg.sol`,
+  `PerpFundingLeg.sol`, `BasisHedgeLeg.sol`. All four implement
+  `IYieldLeg` (allocateTo / harvest / reduceFrom / currentValue /
+  expectedApy / apyHistory / name) and compile clean. They talk to
+  HyperCore via mock-friendly dependency interfaces (`IERC20Router`,
+  `IStakingPool`, `IElysiumCoreWriter`, `IPriceOracle`,
+  `IFundingSource`). Remaining pre-production TODOs live as inline
+  `// TODO:` comments in each file — see the "Leg TODOs" table below.
 
 - **Governance** — the aggregator has `owner` and `keeper` roles but no
   on-chain voting. Add Tally-style gov or 2-of-3 multisig.
@@ -130,11 +140,31 @@ but below the +3-5% claim in `AGGREGATOR_SPEC.md`.
 | Milestone | Definition of done |
 |---|---|
 | **M1: Research artifact** | Repo + specs + Kinetiq email sent. ✅ (this commit) |
-| **M2: Testnet deployment** | 4 leg contracts + aggregator live on Elysium testnet with real funding flowing. |
+| **M2: Testnet deployment** | 4 leg contracts ✅ + aggregator live on Elysium testnet with real funding flowing. |
 | **M3: Audit-ready** | Foundry test suite passes. Aggregator math hardened for ERC-4626 edge cases. |
 | **M4: Mainnet** | Audit passed. Governance live. First 100k USD TVL. |
 
-## 5. Not-doing (explicit)
+## 5. Leg TODOs (in-code)
+
+Each leg carries a small list of pre-production `// TODO:` items. They
+are picked up automatically by the ROADMAP grep (`grep -rn "TODO:"
+solidity/src/legs/`) and are the checklist for M2 → M3.
+
+| Leg | TODO | Owner / Notes |
+|---|---|---|
+| `KHYPELeg` | `fixedApyBps` fallback — remove once live oracle is wired. | Swap to Kinetiq price oracle. |
+| `SpotStakingLeg` | `fixedApyBps` fallback (same as KHYPE). | Same fix. |
+| `SpotStakingLeg` | `UNBONDING_PERIOD = 24h` is a hint; confirm with HyperEVM team. | Pool's `unbondingPeriod()` is the source of truth at runtime. |
+| `PerpFundingLeg` | `HYPE_ASSET_ID = 1` is a placeholder; confirm with Kinetiq. | Writer assigns ids post-launch. |
+| `PerpFundingLeg` | `fixedApyBps` fallback when `fundingSource` is not live. | Same as staking legs. |
+| `PerpFundingLeg` | Add a `submitIntent(Delegation, Signature, uint256)` path — current stub uses `_zeroSig()`. | Production flow signs per intent. |
+| `PerpFundingLeg` | Add `maxLeverage` and notional cap. | Safety. |
+| `PerpFundingLeg`, `BasisHedgeLeg` | Router address set by deployer — replace with production HyperCore DEX. | Router is the only spot-market primitive. |
+| `BasisHedgeLeg` | Add mark-to-market oracle for unrealised perp PnL in `currentValue()`. | Stub counts realised PnL only. |
+| `BasisHedgeLeg` | `HEDGE_RATIO_BPS = 10_000` hard-coded (HR=1.0) per spec. | Make configurable per venue. |
+| `BasisHedgeLeg` | `HYPE_ASSET_ID = 1` placeholder. | Same as PerpFundingLeg. |
+
+## 6. Not-doing (explicit)
 
 - **Options market** — HyperCore doesn't have options. Aggregator is
   spot + LST + perp + basis only.

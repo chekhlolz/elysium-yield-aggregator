@@ -128,23 +128,54 @@ python scripts/deploy.py --leg-addr <leg1> --leg-addr <leg2> \
   --leg-addr <leg3> --leg-addr <leg4>
 ```
 
-Real deploy refuses Elysium mainnet (chainId 999) without
-`--yes-i-mean-it`. Manifests land at `solidity/output/deployments/`.
+Real deploy refuses any chain ID other than the testnet placeholder
+(99801) without `--yes-i-mean-it` AND an explicit `--chain-id`. It also
+explicitly refuses chainId 999, which is **HyperEVM's** mainnet ID, not
+Elysium's — Elysium's own chain ID is published by Kinetiq at mainnet
+launch and has not been confirmed yet. Manifests land at
+`solidity/output/deployments/`.
 
-Contracts (10 total, ~17.6 KB, 0 errors, 0 warnings):
+Contracts (21 total, 0 errors, 2 warnings). The four `IYieldLeg` impl
+contracts (KHYPELeg, SpotStakingLeg, PerpFundingLeg, BasisHedgeLeg)
+landed this week — see `docs/ROADMAP.md §2.1`:
 
 | File | Bytes | ABI entries |
 |---|---|---|
-| `src/aggregator/YieldAggregator.sol` | 12,306 | 42 |
+| `src/aggregator/YieldAggregator.sol` | 12,408 | 46 |
 | `src/delegation/TradeOnlyAgent.sol` | 2,839 | 8 |
 | `src/keeper/RegimeDetector.sol` | 2,523 | 11 |
-| `src/interfaces/IYieldAggregator.sol` | 0 | 23 |
+| `src/legs/KHYPELeg.sol` | 6,843 | 26 |
+| `src/legs/SpotStakingLeg.sol` | 6,852 | 27 |
+| `src/legs/PerpFundingLeg.sol` | 7,466 | 32 |
+| `src/legs/BasisHedgeLeg.sol` | 7,209 | 33 |
+| `src/interfaces/IYieldAggregator.sol` | 0 | 27 |
 | `src/interfaces/ITradeOnlyAgent.sol` | 0 | 5 |
 | `src/interfaces/IYieldLeg.sol` | 0 | 10 |
+| `src/interfaces/IERC20.sol` | 0 | 5 |
+| `src/interfaces/IERC20Router.sol` | 0 | 3 |
+| `src/interfaces/IElysiumCoreWriter.sol` | 0 | 2 |
+| `src/interfaces/IFundingSource.sol` | 0 | 2 |
+| `src/interfaces/IPriceOracle.sol` | 0 | 2 |
+| `src/interfaces/IStakingPool.sol` | 0 | 9 |
 
-**Not shipped**: the four `IYieldLeg` impl contracts (see
-`docs/ROADMAP.md §2.1`). The aggregator's `_legs[4]` is stubbed with
-placeholder addresses in `deploy.py`.
+Total: 46,545 bytes across all contracts (including the `SafeERC20`
+library, `RegimeId` enum, and the minimal `IERC20Minimal` facade).
+
+The four `IYieldLeg` implementations are the actual yield venues the
+aggregator routes capital through: `KHYPELeg` wraps the kHYPE
+liquid-staking token on HyperCore (yield accrues via the pool's
+exchange rate), `SpotStakingLeg` wraps direct HYPE staking on HyperEVM
+with a 24h unbonding hint, `PerpFundingLeg` runs a long-spot / short-
+perp book on HyperCore HYPE-USD perp to capture the funding rate (flipped
+to the short side), and `BasisHedgeLeg` runs the same long-spot /
+short-perp shape at HR = 1.0 but targets basis carry instead of funding.
+All four route through mock-friendly dependency interfaces
+(`IERC20Router`, `IStakingPool`, `IElysiumCoreWriter`, `IPriceOracle`,
+`IFundingSource`), so a test rig can inject stub venues without touching
+HyperCore directly. Pre-production TODOs (router address, live oracle
+wiring, `HYPE_ASSET_ID` confirmation, per-intent EIP-712 signatures,
+mark-to-market oracle for BasisHedgeLeg unrealised PnL) live as inline
+`// TODO:` comments and are catalogued in `docs/ROADMAP.md §5`.
 
 ## Docs
 
