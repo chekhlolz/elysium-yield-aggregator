@@ -21,6 +21,7 @@ from hypeback.aggregator import (
     REGIME_HIGH_VOL,
 )
 from hypeback.engine import load_funding
+from hypeback.engine import CandlePricePath, LognormalPricePath
 
 
 def _load_funding() -> list:
@@ -127,6 +128,67 @@ class TestAggregatorEdgeCases(unittest.TestCase):
             for w in weights:
                 self.assertGreaterEqual(w, 0)
                 self.assertLessEqual(w, 10_000)
+
+
+class TestPricePathAbstraction(unittest.TestCase):
+    """Tests for the PricePath abstraction (Lognormal + Candle variants).
+
+    Uses only synthetic / offline data — no HTTP calls to HyperCore.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        # 100 synthetic 1h candles, close rises by 1.00 per hour.
+        # Field shape matches HyperCoreClient.spot_candles output.
+        cls.candles = [
+            {
+                "t": 1_700_000_000_000 + i * 3_600_000,
+                "T": 1_700_000_000_000 + i * 3_600_000 + 3_599_999,
+                "s": 40.0 + i,
+                "i": "1h",
+                "c": 40.0 + i,
+                "h": 40.0 + i + 0.5,
+                "l": 40.0 + i - 0.5,
+                "v": 100.0,
+                "n": 250,
+            }
+            for i in range(100)
+        ]
+
+    def test_candle_path_yields_closes_verbatim(self):
+        """CandlePricePath returns each candle's close unmodified, in order."""
+        pp = CandlePricePath(self.candles)
+        self.assertEqual(len(pp), 100)
+        self.assertEqual(pp.closes(), [c["c"] for c in self.candles])
+        # Index access matches the list order.
+        for i in range(100):
+            self.assertEqual(pp.close(i), self.candles[i]["c"])
+        # Out-of-order input still sorts by start time.
+        shuffled = list(reversed(self.candles))
+        self.assertEqual(CandlePricePath(shuffled).closes(),
+                         [c["c"] for c in self.candles])
+
+    def test_aggregator_simulation_runs_with_candle_path(self):
+        """A full aggregator sim with a CandlePricePath runs to completion."""
+        funding = [
+            {"coin": "HYPE", "fundingRate": 5e-7, "premium": 0.0,
+             "time": 1_700_000_000_000 + i * 3_600_000}
+            for i in range(100)
+        ]
+        r = run_aggregator_simulation(funding=funding, candles=self.candles,
+                                      params=SimParams(seed=1))
+        self.assertEqual(r["hours"], 100)
+        self.assertEqual(r["price_path_type"], "CandlePricePath")
+        self.assertGreater(r["aggregator_equity"], 0)
+        self.assertGreater(r["static_equity"], 0)
+        self.assertTrue(-1.0 <= r["aggregator_net_apy"] <= 5.0)
+        self.assertTrue(-1.0 <= r["alpha_apy"] <= 5.0)
+        self.assertGreaterEqual(r["max_drawdown"], 0.0)
+        # Passing a pre-built PricePath object directly also works.
+        pp = CandlePricePath(self.candles)
+        r2 = run_aggregator_simulation(funding=funding, price_path=pp,
+                                       params=SimParams(seed=1))
+        self.assertEqual(r2["price_path_type"], "CandlePricePath")
 
 
 if __name__ == "__main__":

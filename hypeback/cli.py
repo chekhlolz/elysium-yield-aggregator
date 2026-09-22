@@ -153,7 +153,7 @@ def cmd_fetch(args):
 def cmd_agg(args):
     from .aggregator import (run_aggregator_simulation,
                              multi_seed_aggregator_simulation,
-                             SimParams)
+                             SimParams, _load_candles)
     p_kwargs = {}
     if args.rebal is not None:
         p_kwargs["rebalance_hours"] = args.rebal
@@ -165,11 +165,16 @@ def cmd_agg(args):
         p_kwargs["xhype_vol_drag_factor"] = args.xhype_drag
     p = SimParams(**p_kwargs)
 
+    candles = _load_candles(args.candles) if args.candles else None
+    if args.candles and args.seeds != 1:
+        print("NOTE: --candles is only honored with --seeds 1; ignoring for multi-seed run.")
+
     if args.seeds == 1:
-        r = run_aggregator_simulation(params=p, window_hours=args.window)
+        r = run_aggregator_simulation(params=p, window_hours=args.window,
+                                      candles=candles)
         print(f"Config: capital=${p.initial_capital:,.0f}  vol={p.vol_annual:.0%}  "
               f"rebal={p.rebalance_hours}h  xHYPE drag={p.xhype_vol_drag_factor:.4f}  "
-              f"seed={p.seed}")
+              f"seed={p.seed}  price_path={r.get('price_path_type', 'lognormal')}")
         print(f"Period: {r['years']:.2f} years ({r['hours']} hours)")
         print(f"Aggregator equity:    ${r['aggregator_equity']:>12,.2f}")
         print(f"Static equity:        ${r['static_equity']:>12,.2f}")
@@ -266,6 +271,9 @@ def main(argv=None):
     p.add_argument("--capital", type=float, default=None, help="initial capital USD")
     p.add_argument("--xhype-drag", type=float, default=None, help="xHYPE vol-drag factor (fraction of |hourly ret|)")
     p.add_argument("--window", type=int, default=None, help="use only last N hours of funding history")
+    p.add_argument("--candles", default=None, metavar="PATH",
+                   help="load spot candles from a JSON file (produced by `fetch --candles`) "
+                        "and use them as the price path")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_agg)
 

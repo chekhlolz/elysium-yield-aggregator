@@ -54,6 +54,7 @@ python -m hypeback gate --hr 1.0 --lev 3
 python -m hypeback agg                          # single seed
 python -m hypeback agg --seeds 30                # aggregate over 30 seeds
 python -m hypeback agg --rebal 24 --json         # hourly rebalance, JSON out
+python -m hypeback agg --candles data/hype_candles_1h.json  # use real spot candles
 
 # fetch live funding / candles from HyperCore
 python -m hypeback fetch --coin HYPE --hours 8760

@@ -22,7 +22,9 @@ import math
 import os
 import random
 import statistics
+from abc import ABC, abstractmethod
 from datetime import datetime, timezone
+from typing import List, Optional
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -67,6 +69,112 @@ DEFAULTS = {
     "vol_annual": 0.70,
     "seed": 42,
 }
+
+
+# ---------------------------------------------------------------------------
+# Price path abstraction
+# ---------------------------------------------------------------------------
+
+class PricePath(ABC):
+    """A source of hourly close prices.
+
+    Subclasses pick the source (random walk, spot candles, ...) and may
+    expose more (e.g. LognormalPricePath returns log-returns as well).
+    The base class exposes only what the simulator actually consumes:
+    the hour count and the close price for a given index.
+    """
+
+    def __init__(self, n_hours: int):
+        self.n_hours = n_hours
+
+    def __len__(self) -> int:
+        return self.n_hours
+
+    @abstractmethod
+    def close(self, i: int) -> float:
+        """Close price for hour index `i` (0-based)."""
+
+    def closes(self) -> List[float]:
+        """Full series of close prices, [0..n_hours-1]."""
+        return [self.close(i) for i in range(self.n_hours)]
+
+
+class LognormalPricePath(PricePath):
+    """Existing zero-mean lognormal random walk.
+
+    Prices start at `start_price` and each hour multiplies by
+    exp(N(0, sigma^2)) with sigma = vol_annual / sqrt(8760).
+    """
+
+    def __init__(self, n_hours: int, vol_annual: float = 0.70,
+                 seed: int = 42, start_price: float = 40.0):
+        super().__init__(n_hours)
+        self.vol_annual = vol_annual
+        self.start_price = start_price
+        self._rng = random.Random(seed)
+        self._sigma = vol_annual / math.sqrt(8760.0)
+        px = start_price
+        self._prices: List[float] = []
+        self._log_returns: List[float] = []
+        for _ in range(n_hours):
+            lr = self._rng.gauss(0.0, self._sigma)
+            px *= math.exp(lr)
+            self._prices.append(px)
+            self._log_returns.append(lr)
+
+    def close(self, i: int) -> float:
+        return self._prices[i]
+
+    @property
+    def log_returns(self) -> List[float]:
+        return list(self._log_returns)
+
+    @property
+    def returns(self) -> List[float]:
+        """Hourly simple returns (one per hour)."""
+        return [math.exp(lr) - 1.0 for lr in self._log_returns]
+
+
+class CandlePricePath(PricePath):
+    """Price path built from a list of spot candles.
+
+    Candles are dicts of the shape returned by HyperCoreClient.spot_candles:
+        {"t": ms_start, "T": ms_end, "s": open, "i": ignored, "c": close,
+         "h": high, "l": low, "v": base_volume, "n": trade_count}
+    The path yields the `close` field verbatim, one per candle, sorted
+    ascending by start time (`t`).
+    """
+
+    def __init__(self, candles: List[dict]):
+        if not candles:
+            raise ValueError("CandlePricePath requires a non-empty candle list")
+        super().__init__(len(candles))
+        self._candles = sorted(candles, key=lambda c: int(c.get("t", 0)))
+        self._prices = [float(c.get("c", 0.0)) for c in self._candles]
+        if any(p <= 0 for p in self._prices):
+            raise ValueError("CandlePricePath requires all close prices > 0")
+
+    def close(self, i: int) -> float:
+        return self._prices[i]
+
+    def candle(self, i: int) -> dict:
+        return self._candles[i]
+
+    @property
+    def returns(self) -> List[float]:
+        """Hourly simple returns implied by the closes (n_hours-1 values)."""
+        out: List[float] = []
+        for i in range(1, self.n_hours):
+            prev = self._prices[i - 1]
+            out.append(self._prices[i] / prev - 1.0 if prev > 0 else 0.0)
+        return out
+
+
+def price_path_for_hours(n_hours: int, vol_annual: float = 0.70,
+                         seed: int = 42, start_price: float = 40.0) -> LognormalPricePath:
+    """Convenience: build the default lognormal path for a given length."""
+    return LognormalPricePath(n_hours=n_hours, vol_annual=vol_annual,
+                              seed=seed, start_price=start_price)
 
 
 # ---------------------------------------------------------------------------

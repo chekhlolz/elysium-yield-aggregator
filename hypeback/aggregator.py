@@ -28,13 +28,15 @@ FUNDING_NEG.
 
 from __future__ import annotations
 
+import json
 import math
 import random
 import statistics
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 
-from .engine import load_funding, DEFAULTS
+from .engine import (load_funding, DEFAULTS, PricePath,
+                     LognormalPricePath, CandlePricePath)
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +207,22 @@ class SimParams:
     priority_fee_usd: float = 1.20    # ~0.03 HYPE at $40
     seed: int = 42
     lookback_hours: int = 24
+    # Optional override of the Thresholds object used for regime detection.
+    # When None the sim builds `Thresholds(lookback_hours=lookback_hours)`
+    # with all other fields at their class defaults (backward-compatible).
+    thresholds: Optional["Thresholds"] = None
+
+
+def _load_candles(path: str) -> List[dict]:
+    """Load a candle JSON file produced by `python -m hypeback fetch --candles`."""
+    with open(path) as f:
+        data = json.load(f)
+    if isinstance(data, dict):
+        # Tolerate {"candles": [...]} wrappers.
+        data = data.get("candles", [])
+    if not isinstance(data, list):
+        raise ValueError(f"candle file {path} must contain a list of candle dicts")
+    return data
 
 
 def run_aggregator_simulation(
@@ -213,17 +231,74 @@ def run_aggregator_simulation(
     funding: Optional[List[dict]] = None,
     return_curve: bool = False,
     window_hours: Optional[int] = None,
+    price_path: Optional[PricePath] = None,
+    candles: Optional[List[dict]] = None,
 ) -> Dict:
     """Simulate the aggregator with regime-driven reallocation.
 
     Returns a dict with final equity, net APY, max DD, alpha vs static,
     regime breakdown, fee total, and (optionally) equity curve.
+
+    Price path sources (highest priority wins):
+        price_path : a pre-built PricePath instance (LognormalPricePath,
+                     CandlePricePath, or any subclass exposing .returns).
+        candles    : a list of spot-candle dicts from HyperCoreClient;
+                     wrapped in CandlePricePath automatically.
+        (default)  : lognormal random walk driven by SimParams.vol_annual
+                     and SimParams.seed.
+
+    When a candle path is supplied, the simulation length is truncated to
+    min(len(funding), len(candles)) so the price and funding series stay
+    aligned hour-for-hour.
     """
     p = params or SimParams()
     if funding is None:
         funding = load_funding(funding_path)
     if window_hours:
         funding = funding[-window_hours:]
+
+    # Build the price path.
+    if price_path is None:
+        if candles is not None:
+            price_path = CandlePricePath(candles)
+        else:
+            price_path = LognormalPricePath(
+                n_hours=len(funding),
+                vol_annual=p.vol_annual,
+                seed=p.seed,
+            )
+
+    # Align simulation length to the shorter of funding and price path.
+    n = min(len(funding), len(price_path))
+    if n == 0:
+        result = {
+            "years": 0.0, "hours": 0,
+            "initial_capital": p.initial_capital,
+            "aggregator_equity": p.initial_capital,
+            "static_equity": p.initial_capital,
+            "aggregator_net_apy": 0.0, "static_net_apy": 0.0, "alpha_apy": 0.0,
+            "max_drawdown": 0.0, "fees_paid": 0.0, "trades": 0,
+            "regime_counts": {}, "regime_switches": 0,
+            "total_yield_accrued": 0.0, "static_total_yield": 0.0,
+            "price_path_type": type(price_path).__name__,
+            "params": p.__dict__,
+        }
+        return result
+    funding = funding[:n]
+
+    # Hourly simple returns. Prefer the path's own returns; if the path is
+    # shorter than the funding window we top up with a lognormal walk so
+    # the two series stay hour-aligned.
+    path_returns = list(price_path.returns)
+    if len(path_returns) >= n:
+        hourly_returns: List[float] = path_returns[:n]
+    else:
+        rng = random.Random(p.seed + 1)
+        hourly_sigma = p.vol_annual / math.sqrt(8760.0)
+        hourly_returns = path_returns + [
+            math.exp(rng.gauss(0, hourly_sigma)) - 1.0
+            for _ in range(n - len(path_returns))
+        ]
 
     # Static benchmark: same initial weights as the aggregator's default
     # REGIME_BASE allocation, never rebalanced.
@@ -232,20 +307,15 @@ def run_aggregator_simulation(
         legs=_init_legs(p.initial_capital, static_weights),
         equity=p.initial_capital,
     )
-
     aggregator_state = AggregatorState(
         legs=_init_legs(p.initial_capital, static_weights),
         equity=p.initial_capital,
     )
 
-    # Warm up baseline vol using the first `lookback_hours` funding-adjacent
-    # returns. Since we don't have real hourly returns, we simulate them
-    # from lognormal with the configured vol.
-    rng = random.Random(p.seed)
-    hourly_sigma = p.vol_annual / math.sqrt(8760.0)
-    baseline_returns: List[float] = [math.exp(rng.gauss(0, hourly_sigma)) - 1
-                                     for _ in range(p.lookback_hours)]
-    baseline_vol = statistics.stdev(baseline_returns)
+    # Baseline vol: empirical stdev of the first `lookback_hours` returns
+    # (falls back to 0.0 if the window is too short).
+    window_ret = hourly_returns[:p.lookback_hours]
+    baseline_vol = statistics.stdev(window_ret) if len(window_ret) > 1 else 0.0
 
     equity_curve = [p.initial_capital]
     equity_peak = p.initial_capital
@@ -254,11 +324,9 @@ def run_aggregator_simulation(
     lookback_rates: List[float] = []
     lookback_returns: List[float] = []
 
-    for i, rec in enumerate(funding):
-        funding_rate = float(rec["fundingRate"])
-
-        # Advance price path (lognormal step).
-        px_ret = math.exp(rng.gauss(0, hourly_sigma)) - 1
+    for i in range(n):
+        funding_rate = float(funding[i]["fundingRate"])
+        px_ret = hourly_returns[i]
 
         # Yield accrues on each leg independently. Perp funding is signed.
         for state in (aggregator_state, static_state):
@@ -287,7 +355,7 @@ def run_aggregator_simulation(
             lookback_returns.pop(0)
 
         if i > 0 and i % p.rebalance_hours == 0:
-            thr = Thresholds(lookback_hours=p.lookback_hours)
+            thr = p.thresholds or Thresholds(lookback_hours=p.lookback_hours)
             new_regime = classify_regime(lookback_rates, lookback_returns,
                                          baseline_vol, thr)
             if new_regime != aggregator_state.regime:
@@ -304,7 +372,7 @@ def run_aggregator_simulation(
 
     # ---- Static benchmark metrics ----
     static_state.equity = sum(l.value for l in static_state.legs) - static_state.fee_paid
-    years = len(funding) / 8760.0
+    years = n / 8760.0
     aggregator_apy = ((aggregator_state.equity / p.initial_capital)
                       ** (1 / years) - 1) if years > 0 else 0.0
     static_apy = ((static_state.equity / p.initial_capital)
@@ -313,13 +381,11 @@ def run_aggregator_simulation(
 
     # Regime tally.
     regime_counts: Dict[int, int] = {}
-    prev_regime = aggregator_state.regime_history[0][1] if aggregator_state.regime_history else REGIME_BASE
-    for i, rec in enumerate(funding):
+    for i in range(n):
         if i == 0:
             regime_counts[REGIME_BASE] = regime_counts.get(REGIME_BASE, 0) + 1
             continue
-        # Find the regime active at hour i by walking the history.
-        active = prev_regime
+        active = REGIME_BASE
         for hr_idx, reg in aggregator_state.regime_history:
             if hr_idx <= i:
                 active = reg
@@ -327,7 +393,7 @@ def run_aggregator_simulation(
 
     result = {
         "years": years,
-        "hours": len(funding),
+        "hours": n,
         "initial_capital": p.initial_capital,
         "aggregator_equity": aggregator_state.equity,
         "static_equity": static_state.equity,
@@ -341,6 +407,7 @@ def run_aggregator_simulation(
         "regime_switches": len(aggregator_state.regime_history),
         "total_yield_accrued": aggregator_state.total_yield,
         "static_total_yield": static_state.total_yield,
+        "price_path_type": type(price_path).__name__,
         "params": p.__dict__,
     }
     if return_curve:
