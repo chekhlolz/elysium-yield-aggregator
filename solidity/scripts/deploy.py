@@ -1,9 +1,15 @@
 """Deploy hypeback contracts to an EVM RPC endpoint.
 
 Targets:
-    Elysium testnet (chainId 99801)
-    Elysium mainnet (chainId 999, post-mainnet)
+    Elysium testnet (chainId 99801, placeholder — real ID TBA at launch)
+    Elysium mainnet (chain ID published by Kinetiq at mainnet launch)
     Any local Anvil/Hardhat/Foundry node for smoke tests
+
+NOTE on chain IDs: HyperEVM mainnet uses chainId 999. Elysium's own
+chain ID is published by Kinetiq at mainnet launch and has NOT been
+confirmed yet. The testnet placeholder 99801 is our internal convention
+for the dry-run default; production deploys must pass --chain-id
+explicitly and verify against the published value.
 
 Requirements:
     pip install web3 py-solc-x
@@ -16,7 +22,10 @@ Usage:
     python scripts/deploy.py --dry-run  # build artifacts, don't send tx
 
 Safety:
-    - Refuses to run if --chain-id is mainnet 999 without --yes-i-mean-it.
+    - Refuses to deploy to any chain ID other than the testnet placeholder
+      without --yes-i-mean-it AND an explicit --chain-id.
+    - Explicitly refuses chainId 999 (HyperEVM mainnet) — these contracts
+      are designed for Elysium, not HyperEVM.
     - Emits a JSON deployment manifest at output/deployments/<timestamp>.json
       recording chain id, contract addresses, and the tx hashes.
 
@@ -48,8 +57,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SOLC_VERSION = "0.8.26"
 ELYSIUM_TESTNET_RPC_DEFAULT = "https://testnet-rpc.elysium.kinetiq.xyz"
 ELYSIUM_MAINNET_RPC_DEFAULT = "https://rpc.elysium.kinetiq.xyz"
-ELYSIUM_TESTNET_CHAIN_ID = 99801
-ELYSIUM_MAINNET_CHAIN_ID = 999
+# 99801 is a PLACEHOLDER chain ID, not a confirmed value. Kinetiq's docs
+# (elysium.kinetiq.xyz/docs/chain-specifications) say the real chain ID
+# will be published at mainnet launch. This value is only used as a
+# default in dry-run mode and for the testnet RPC; production deploys
+# must pass --chain-id explicitly and verify against Kinetiq's published
+# value. Note: 999 is HyperEVM's mainnet chain ID, NOT Elysium's.
+ELYSIUM_TESTNET_CHAIN_ID = 99801  # placeholder; verify at launch
+HYPEREVM_MAINNET_CHAIN_ID = 999  # HyperEVM, NOT Elysium — refuse deploys here
 
 
 def _compile_standard(sources: dict) -> dict:
@@ -195,7 +210,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--out", default=None)
     ap.add_argument("--yes-i-mean-it", action="store_true",
-                    help="required for mainnet (chainId 999) deploys")
+                    help="required for any non-testnet (mainnet) deploy; "
+                         "must be paired with an explicit --chain-id")
     ap.add_argument("--asset", default="0x0000000000000000000000000000000000000000",
                     help="ERC-20 asset address for the aggregator")
     ap.add_argument("--keeper", default="0x0000000000000000000000000000000000000000",
@@ -243,10 +259,30 @@ def main(argv: Optional[list] = None, provider=None) -> int:
         chain_id = args.chain_id or web3.eth.chain_id
         print(f"Connected. chainId={chain_id}")
 
-    if chain_id == ELYSIUM_MAINNET_CHAIN_ID and not args.yes_i_mean_it:
-        print("REFUSING: chainId 999 is Elysium mainnet. Re-run with --yes-i-mean-it.",
-              file=sys.stderr)
-        sys.exit(2)
+    # Non-testnet guard. Elysium's mainnet chain ID has not been
+    # published as of 2026-09-22 (see docs/AGGREGATOR_SPEC.md).
+    # We refuse to deploy to any chain ID other than the testnet
+    # placeholder without --yes-i-mean-it AND an explicit --chain-id
+    # (so a stale default can't slip through). The HyperEVM mainnet
+    # ID 999 is refused outright — these contracts are designed for
+    # Elysium, not HyperEVM.
+    if chain_id != ELYSIUM_TESTNET_CHAIN_ID:
+        if chain_id == HYPEREVM_MAINNET_CHAIN_ID:
+            print(f"REFUSING: chainId {chain_id} is HyperEVM mainnet, NOT Elysium. "
+                  "These contracts are designed for Elysium. Double-check "
+                  "your RPC URL.", file=sys.stderr)
+            sys.exit(2)
+        if not args.yes_i_mean_it:
+            print(f"REFUSING: chainId {chain_id} is not the testnet placeholder "
+                  f"({ELYSIUM_TESTNET_CHAIN_ID}). Elysium mainnet chain ID is "
+                  "TBA (per Kinetiq docs). Verify against the published value, "
+                  "then re-run with --yes-i-mean-it.", file=sys.stderr)
+            sys.exit(2)
+        if not args.chain_id:
+            print(f"REFUSING: chainId {chain_id} was inferred from the RPC. "
+                  "Pass --chain-id explicitly to confirm you know which chain "
+                  "you're deploying to.", file=sys.stderr)
+            sys.exit(2)
 
     # Parse aggregator args.
     weights = [int(x) for x in args.weights.split(",")]

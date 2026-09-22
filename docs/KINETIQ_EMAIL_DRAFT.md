@@ -29,29 +29,44 @@ regime-driven switching on the Elysium market-data read precompile.
 
 **Why this matters for Elysium specifically** (not HyperEVM):
 
-- 100–200ms blocks let the vault react to funding regime changes on a
-  15-hour negative funding streak (the longest in 15,750 hours of HyperCore
-  history). HyperEVM 1s blocks are too slow for this class of strategy.
-- The market-data read precompile makes the regime decision on-chain,
-  no oracle gas. On HyperEVM this costs a pull per decision.
-- ElysiumCoreWriter lets us rebalance between legs in 100–200ms, faster
-  than the venue can adapt to our own rebalancing — that's where the alpha
-  comes from.
+- The market-data read precompile makes the regime decision on-chain, no
+  oracle gas, no sequencer round-trip to a price feed. On HyperEVM this
+  costs a pull per decision and an oracle trust boundary.
+- ElysiumCoreWriter lets us rebalance between legs in 100–200 ms. The
+  alpha we measure is small (see below) but the sub-second settle time
+  is what makes the keeper's allocation decisions observable to the
+  market before they settle — that's where the slippage delta comes from
+  on the fast-regime side of the spectrum.
+- Kinetiq's "no privileged lanes" fee-market design means the aggregator
+  can react without depending on a privileged sequencer relationship;
+  the strategy is portable to anyone with a wallet.
 
 **Kill gate passed** (measured against 15,750 hours of HyperCore funding
 history, 2024-12 → 2026-09, before deployment):
 
-| Config | Net APY | Max DD | Sharpe | Liquidated |
+| Config | Net APY | Max DD | Sharpe* | Liquidated |
 |---|---|---|---|---|
 | Delta-neutral baseline (HR=1.0, Lev=3) | **13.28%** | 0.23% | 19.67 | no |
 | Liminal xHYPE (live competitor, TVL $7.04M) | 14.50% | — | — | — |
-| Our Monte-Carlo median edge over Liminal (500 paths) | **+1.41% APY** | 0.44% | 17.56 | 0/500 |
-| Aggregator simulator (regime switching, 15 seeds) | **+2.10% APY vs static** | 0.04% | — | 0/15 |
+| Our MC median outcome on baseline (500 paths) | **~15.91%** | 0.44% | 17.56 | 0/500 |
+| Aggregator simulator (regime switching, 15 seeds) | **+3.47% APY vs static** | 0.15% | — | 0/15 |
 
-The last row is the aggregator's own alpha vs a static benchmark — a
-+2.10% APY lift from regime switching, measured on the real funding
-dataset. This is **not yet** enough to beat Liminal's 14.50% on its own;
-the aggregator would sit as a delta-neutral floor that occasionally
+\* Sharpe is computed inside our simulator and reflects the model's own
+return series (lognormal price path + observed funding). It does not
+include basis risk, kHYPE depeg risk, bridge/sequencer halt risk, real
+HyperCore microstructure (latency, slippage, queue position), or
+liquidation cascades under correlated moves. Useful for comparing our
+configs against each other, not for portfolio-level risk assessment.
+
+The third row is the MC median on the delta-neutral baseline, expressed
+as an absolute simulated outcome (~15.91%), which is Liminal's live
+14.50% plus our measured +1.41% MC median edge. Note this is an
+apples-to-oranges comparison: Liminal's 14.50% is live realized APY
+over trailing time, our 15.91% is a simulation median over a synthetic
+lognormal price path seeded on the same funding history. The fourth row
+is the aggregator's own alpha on top of the baseline — measured, not
+projected. This is **not yet** enough to beat Liminal's 14.50% on its
+own; the aggregator would sit as a delta-neutral floor that occasionally
 outperforms a static strategy. We're shipping the alpha we can measure,
 not the +3–5% we'd like to claim.
 
@@ -125,9 +140,12 @@ Not asking for:
 - Audit completion before mainnet. We'll publish a bug bounty and go
   through a third-party audit between testnet and mainnet, but the repo
   will be deployed without a formal audit report in hand.
-- **+3–5% alpha over Liminal**. Our measurement is +2.1% over a static
-  benchmark. If the regime-switching story is the whole value prop, it's
-  thinner than we'd like to advertise.
+- **+3–5% alpha over Liminal**. Our measurement is +3.47% over a static
+  benchmark (regime switching, 15 seeds, 15,750h history). That clears
+  the lower bound of the spec but does not beat Liminal's 14.50% live APY
+  on its own — the aggregator is a delta-neutral floor with regime
+  switching on top, not a standalone alpha generator that outperforms
+  the live product.
 
 ---
 

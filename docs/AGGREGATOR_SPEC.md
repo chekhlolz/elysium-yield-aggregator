@@ -182,13 +182,22 @@ The 5-minute timelock is a safety net against keeper compromise. During the time
 
 | Source | Mechanism | Estimated edge |
 |---|---|---|
-| Regime switching | PerpFundingLeg → KHYPELeg on FUNDING_NEG regime | +2-3% APY (based on 15h longest negative streak in data) |
-| Fast rebalance | 100-200ms ElysiumCoreWriter vs 1-2s HyperEVM block | +0.5-1% APY (less slippage on rebalance) |
+| Regime switching | PerpFundingLeg → KHYPELeg on FUNDING_NEG regime | +2-3% APY (measured: +2.10% APY, see §4 empirical note) |
+| Fast rebalance | 100-200ms ElysiumCoreWriter settle vs 1-2s HyperEVM block | +0.5-1% APY (less slippage on rebalance) |
 | On-chain decisions | market-data precompile vs oracle gas | +0.3-0.5% APY (no oracle cost) |
 | Basis opportunity | capture spot-perp basis via BasisHedgeLeg on regime shift | +0.5-1% APY |
 
 **Total edge estimate**: +3-5% APY over Liminal, achievable only if the
 aggregator reacts faster than the market can adapt to its own rebalancing.
+
+> **Note on the "fast rebalance" claim**: the regime classifier itself
+> uses a 24h EMA, not a 100ms tick — so sub-second block time does NOT
+> let the aggregator "react faster" to a 15-hour funding streak than a
+> 1s-block chain could. The genuine value of 100-200ms blocks is (a) the
+> keeper's allocation decision is settled on-chain before slippage can
+> price it in, and (b) the ElysiumCoreWriter path is shorter than a
+> spot-then-perp round-trip on a slower chain. The +0.5-1% estimate is
+> the slippage component, not a reaction-speed component.
 
 > **Empirical finding (2026-09-22)**: the aggregator simulator
 > (`hypeback/aggregator.py`) measures **+2.10% APY median alpha over a
@@ -240,7 +249,7 @@ The current delta-neutral baseline (HR=1.0, Lev=3) clears this at 13.28% APY / 0
 
 Deterministic seed=42, funding history 2024-12-05 → 2026-09-22:
 
-| Config | Net APY | Max DD | Sharpe | Liq |
+| Config | Net APY | Max DD | Sharpe* | Liq |
 |---|---|---|---|---|
 | HR=1.0, Lev=3, 2 rebal/day | 13.28% | 0.23% | 19.67 | n |
 | HR=1.5, Lev=3, 2 rebal/day | 6.50% | 25.02% | 0.42 | n (but MC: 31/500 liq) |
@@ -248,8 +257,26 @@ Deterministic seed=42, funding history 2024-12-05 → 2026-09-22:
 | HR=1.0, 90d window | 58.01% | — | — | — |
 | Liminal xHYPE (live) | 14.50% | — | — | — |
 
-MC edge vs Liminal (median 500 paths): **+1.41% APY** on HR=1.0 delta-neutral baseline. Regime switching expected to add another +1.5-2% APY in the aggregator layer.
+\* **Sharpe is computed inside the simulator** and reflects the model's
+own return series (lognormal price path + observed funding). It is not
+a real Sharpe ratio because the model does not include: basis risk
+(spot-perp dislocation), depeg risk on kHYPE, bridge / sequencer halt
+risk, real market microstructure on HyperCore (latency, slippage, queue
+position), or liquidation cascades under correlated moves. Treat the
+Sharpe column as "sim-internal risk-adjusted return" — useful for
+comparing configs against each other, not for portfolio-level risk
+assessment.
+
+MC edge vs Liminal xHYPE (median of 500 price paths, HR=1.0 delta-neutral
+baseline): **+1.41% APY** on top of Liminal's 14.50% live APY, i.e. a
+simulated median outcome of ~15.91% vs Liminal's live 14.50%. This is
+an apples-to-oranges comparison — Liminal's 14.50% is live realized APY
+over trailing time, the 15.91% is a simulation median over a synthetic
+lognormal price path seeded on the same funding history. The MC figure
+is included to bound the delta-neutral floor; regime switching on top
+adds another +1.5–2% APY in the aggregator layer (measured separately,
+see §4).
 
 ---
 
-*Generated for the Elysium builder workstream. Questions to the Kinetiq team on the `builders` allocation allocation channel.*
+*Generated for the Elysium builder workstream. Questions to the Kinetiq team on the `builders` allocation channel.*

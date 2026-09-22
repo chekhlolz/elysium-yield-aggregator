@@ -31,6 +31,12 @@ interface IYieldAggregator {
     function mint(uint256 shares, address receiver) external returns (uint256 assets);
     function redeem(uint256 shares, address receiver, address owner) external returns (uint256 assets);
 
+    // ---- ERC-4626 previews ----
+    function previewDeposit(uint256 assets) external view returns (uint256);
+    function previewMint(uint256 shares) external view returns (uint256);
+    function previewWithdraw(uint256 assets) external view returns (uint256);
+    function previewRedeem(uint256 shares) external view returns (uint256);
+
     // ---- Current regime state ----
     function currentApyBps() external view returns (uint256);
     function weights() external view returns (uint16[4] memory);

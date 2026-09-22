@@ -41,8 +41,12 @@ HYPERLIQUID_API_DEFAULT = "https://api.hyperliquid.xyz"
 
 # Elysium precompile address — TBA by Kinetiq. Placeholder for now.
 HYPERCORE_PRECOMPILE_ADDRESS = "0x000000000000000000000000000000000000C0DE"  # placeholder
-ELYSIUM_PRECOMPILE_CHAIN_ID = 999  # Elysium mainnet
-ELYSIUM_TESTNET_CHAIN_ID = 99801
+# 99801 is a PLACEHOLDER testnet chain ID, not a confirmed value.
+# Kinetiq's docs (elysium.kinetiq.xyz/docs/chain-specifications) say the
+# real chain ID will be published at mainnet launch. Note: 999 is
+# HyperEVM's mainnet chain ID, NOT Elysium's — do not use 999 here.
+ELYSIUM_MAINNET_CHAIN_ID = None  # TBD by Kinetiq at launch
+ELYSIUM_TESTNET_CHAIN_ID = 99801  # placeholder
 
 
 # ---- HTTP helpers (no external deps beyond stdlib). ----
@@ -160,7 +164,7 @@ class PrecompileClient:
         candles = pc.spot_candles("HYPE", interval="1h", hours=24*365)
     """
 
-    def __init__(self, precompile_addr: str, web3=None, chain_id: int = ELYSIUM_PRECOMPILE_CHAIN_ID):
+    def __init__(self, precompile_addr: str, web3=None, chain_id: int = ELYSIUM_TESTNET_CHAIN_ID):
         self.addr = precompile_addr
         self.web3 = web3
         self.chain_id = chain_id

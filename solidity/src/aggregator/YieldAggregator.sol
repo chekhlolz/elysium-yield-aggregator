@@ -137,6 +137,30 @@ contract YieldAggregator {
         return total;
     }
 
+    // ---- ERC-4626 preview functions ----
+    // The standard requires preview* variants that mirror the actual
+    // deposit/withdraw/mint/redeem return values. For this aggregator
+    // the exchange rate is computed from totalAssets / totalShares, so
+    // the preview values are identical to the would-be return values
+    // (no rounding difference, no fee layer). That matches ERC-4626's
+    // "preview value shall not decrease" rule — our preview and actual
+    // always agree.
+    function previewDeposit(uint256 assets) external view returns (uint256) {
+        return convertToShares(assets);
+    }
+
+    function previewMint(uint256 shares) external view returns (uint256) {
+        return convertToAssets(shares);
+    }
+
+    function previewWithdraw(uint256 assets) external view returns (uint256) {
+        return convertToShares(assets);
+    }
+
+    function previewRedeem(uint256 shares) external view returns (uint256) {
+        return convertToAssets(shares);
+    }
+
     function totalAssets() public view returns (uint256) {
         return totalLegValue() + asset_.balanceOf(address(this));
     }
