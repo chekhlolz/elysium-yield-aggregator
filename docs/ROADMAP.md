@@ -214,6 +214,13 @@ accepted spec tradeoff, documented in `DELEGATION_SPEC.md §9`).
 | KI-4 | ~~`setFixedApyBps(v)` on all 4 legs writes `fixedApyBps` but doesn't refresh `latestApyBps`. Until the next `harvest()` or `allocateTo()` runs, `expectedApy()` continues returning the stale `latestApyBps`.~~ | All 4 legs | **FIXED in round-4**: `setFixedApyBps` now sets `latestApyBps = v` when the oracle/fundingSource is unwired. Regression tests: `test_KI4_*Leg_setFixedApyBps_refreshesExpectedApy` (4 legs). |
 | KI-5 | ~~`_allocatedTotal` in `YieldAggregator` decrements by `delta` on `executePending`'s reduce path, but `legs[i].reduceFrom(delta)` may return less than `delta` (unstake waiting, rounding). The accounting is optimistic — vault's share balances can exceed `_allocatedTotal + freeCash` on a slow leg.~~ | `src/aggregator/YieldAggregator.sol` | **FIXED in round-4**: `executePending` and `_redeem` now use the actual `reduceFrom` return value instead of the requested `delta`/`take`. `_redeem` also breaks early if a leg returns 0 to avoid silently under-delivering. |
 | KI-6 | `recordExecution` in `TradeOnlyAgent` accepts a `notional` up to the delegation's `maxNotional`, but the venue-local `usedNotional` cap is per-`(venue, delegator, keeper, nonce)` — a delegation signed once can be used on N venues for a total of N × maxNotional. This is documented in `DELEGATION_SPEC.md §9`; production will add a per-delegation aggregate cap if cross-venue abuse becomes realistic. | `src/delegation/TradeOnlyAgent.sol` | Accepted limitation; not a bug, just a spec tradeoff. |
+| KI-9 | ~~`TradeOnlyAgent.recordExecution` did not verify the delegation's EIP-712 signature — a venue could record an execution for a delegation that was never signed by the keeper.~~ **Round-9 responsibility-split decision**: per `DELEGATION_SPEC.md §4`, signature verification is a **venue-side responsibility** (the venue holds the intent + sig and verifies before calling the writer). The verifier (`TradeOnlyAgent`) enforces only the cap math and the revocation state. This split is now documented in the KI-6 row and accepted. | `src/delegation/TradeOnlyAgent.sol` | Accepted spec tradeoff (venue responsibility per DELEGATION_SPEC.md §4). Not a bug. |
+| KI-10 | ~~`recordExecution` did not enforce `d.maxPerOrder` — a venue could record an execution with a notional up to `d.maxNotional` (per-delegation total cap) but bypass the per-order ceiling.~~ **Fixed in round-9** (commit `e01dc1d`): `recordExecution` now enforces `require(notional <= d.maxPerOrder, "per-order cap")`. | `src/delegation/TradeOnlyAgent.sol` | **FIXED in round-9**: `require(notional <= d.maxPerOrder)` in `recordExecution`. Regression tests: `test_recordExecution_rejects_overPerOrderCap`, `test_recordExecution_accepts_atPerOrderCap`. |
+| KI-11 | ~~`TradeOnlyAgent._recover` accepted non-canonical ECDSA signatures: `r == 0`, `s == 0`, and `s > secp256k1.order / 2` all passed through to `ecrecover`, which either returned the zero address or returned a wrong signer depending on the value. A hostile caller could pick a signature variant that made `isValidDelegation` pass on a delegation they didn't sign.~~ | `src/delegation/TradeOnlyAgent.sol` | **FIXED in round-9**: `_recover` now rejects `r == 0`, `s == 0`, and non-canonical `s > 0x7F...681B20A0` (the mathematically correct `(n-1)/2` for secp256k1). Regression tests: `test_accept_canonical_signature`, `test_reject_zero_r`, `test_reject_zero_s`, `test_reject_non_canonical_s`. Note: the round-9 task brief supplied the wrong upper bound (`0x7F...4501DDFE92F46688B214`); the correct value is used in the code with a comment pointing at the discrepancy. |
+| KI-12 | ~~`YieldAggregator.setTimelock(0)` was an owner-grief vector: setting the timelock to 0 let a compromised keeper request-and-execute a rebalance in the same block, defeating the timelock's purpose.~~ | `src/aggregator/YieldAggregator.sol` | **FIXED in round-9**: `require(_ts >= 60, "timelock below 60s")` in `setTimelock`. Regression tests: `test_setTimelock_rejectsBelowMinimum`, `test_setTimelock_acceptsMinimum`, `test_setTimelock_acceptsHigherValue`, `test_setTimelock_requiresOwner`. 60s is the floor; production should tune far higher. |
+| KI-13 | ~~`YieldAggregator` ABI `assetIds` allowlist was enforced by the aggregator on the venue side but not verified in the writer path — a venue could execute against an `assetId` the owner never approved.~~ **Round-9 responsibility-split decision**: per `AGGREGATOR_SPEC.md §2`, the venue is responsible for rejecting unknown `assetId`s; the aggregator only owns the allowlist policy. The venue-side enforcement is documented in `PerpFundingLeg.sol` / `BasisHedgeLeg.sol`. | `src/aggregator/YieldAggregator.sol`, `src/legs/PerpFundingLeg.sol`, `src/legs/BasisHedgeLeg.sol` | Accepted spec tradeoff (venue responsibility per AGGREGATOR_SPEC.md §2). Not a bug. |
+| KI-14 | ~~`PerpFundingLeg._fallbackSig` / `BasisHedgeLeg._fallbackSig` reachable in production if the `fundingSource` is ever unwired post-deploy — the writer would be called with a zero signature and revert, or worse if a hostile fundingSource returns a valid-but-unintended sig.~~ **Round-9 responsibility-split decision**: the perp legs are gated by `owner` on deploy and `fundingSource` is only ever mutated via the constructor (currently immutable). Reaching `_fallbackSig` in production requires a compromised keeper + a `fundingSource` unwire, which is a governance issue, not a leg-level bug. Tracked for the KI-2b Phase 2 aggregator refactor. | `src/legs/PerpFundingLeg.sol`, `src/legs/BasisHedgeLeg.sol` | Deferred to KI-2b Phase 2 aggregator refactor. Not a bug in current architecture. |
+| KI-15 | ~~`khypeBalance` / `rewardHypeBalance` is tracked in HYPE-input units but the pool holds stake tokens — on any `pool.exchangeRate()` move, `reduceFrom` decrements a HYPE amount while `pool.unstake` burns a stake-token amount, and the two diverge by the rate delta. The KI-1 comment at `KHYPELeg.sol:125-130` describes an intent (rate folded in at `allocateTo`) that the code does not implement.~~ | `src/legs/KHYPELeg.sol`, `src/legs/SpotStakingLeg.sol` | **DESIGN ONLY in round-9**: tracked as `docs/DESIGN_KI1_RATE_TRACKING.md`. Recommended option A (stake-token count semantics + live rate in `currentValue()`). Implementation deferred to agent F, round-10 / round-11. Design closes round-9 finding #1/#2 (accounting drift) and finding #17 (comment/code mismatch). |
 | KI-7 | ~~`withdraw(assets, receiver, _owner)` for delegated callers (`msg.sender != _owner`) pulled `assets` of USDC from the owner via `safeTransferFrom` BEFORE burning the shares and paying the owner back the same `assets`. The net USDC flow was zero but it (a) required the owner to pre-approve the vault for the withdrawal amount, which is nonsense — they already hold shares, they're not depositing again; (b) made delegate withdraw revert on any caller that hadn't pre-approved, even though delegation authorization is a calling-interface convention, not an on-chain authz.~~ | `src/aggregator/YieldAggregator.sol:241-260` | **FIXED in round-5**: removed the collateral pull. `withdraw` now burns shares and pays out of the vault's own holdings regardless of `msg.sender`. Regression test: `test_withdraw_delegateDoesNotPullUSDC`. |
 | KI-8 | ~~`redeem(newShares, receiver, _owner)` for delegated callers compared `asset_.allowance(_owner, msg.sender) >= newShares` — a category error that checked a USDC allowance against a share amount. The vault keeps shares as plain U256 counters (`shareBalances[_owner]`), not as an ERC-20-like share token with an `allowance` mapping. Pre-fix, delegate redeem reverted on any caller that hadn't pre-approved a share-count-sized USDC allowance.~~ | `src/aggregator/YieldAggregator.sol:262-278` | **FIXED in round-5**: removed the share-allowance gate. Delegate `redeem` now works for any caller. Regression tests: `test_redeem_delegateNoShareAllowanceGate`, `test_redeem_delegateWithNoApproval`, `test_redeem_delegateSucceedsAndBurnsShares`. |
 
@@ -305,6 +312,168 @@ Round-7 (2026-09-23) closed **KI-2** and lifted the test suite from
 Net effect: **120 tests, 0 failed** (`forge test`), **KI-2 closed**,
 only **KI-6** (accepted spec tradeoff) remains open for M2.
 
+### 2.8 Round-8 + Round-9 changelog
+
+Round-8 (2026-09-23) and round-9 (2026-09-24) lifted the test suite
+from 120 → 171 tests and closed five real bugs from an adversarial
+review, plus documented four spec-accepted responsibility splits.
+Commits `e38d117` → `e01dc1d` (round-8: `e38d117`, `3ba4de2`;
+round-9: `5534c60`, `e01dc1d`).
+
+#### Round-8 (commits `e38d117` + `3ba4de2`)
+
+- **Harvest accounting fix** — `harvest()` no longer decrements
+  `allocatedUsd` on either staking leg (`KHYPELeg.sol`,
+  `SpotStakingLeg.sol`). Realised USDC yield is swept to the owner,
+  but the principal ledger tracks the underlying HYPE position, not
+  the realised reward. Decrementing would drift the aggregator's
+  `_allocatedTotal` downward by the yield amount on the next
+  `harvestFromAllLegs()` refresh. Closes §9.2 of
+  `DESIGN_KI1_UNIT_RECONCILE.md`.
+- **Router slippage guard** — `slippageBps` config field added to
+  both stake legs (constructor param + owner-settable `setSlippageBps`,
+  0 disables the guard, 100 = 1% is the recommended production
+  default). Guard is a post-swap check on the router return value:
+  `hypeIn >= (usdAmount * 1e18 * (10000 - slippageBps)) / (price * 10000)`.
+  Closes §9.3 of `DESIGN_KI1_UNIT_RECONCILE.md`.
+- **Fuzz coverage** — 20 new fuzz tests in
+  `solidity/test/FuzzCoverage.t.sol` covering the gaps from
+  `docs/TEST_COVERAGE_GAP.md §6`: aggregator `convertToShares` /
+  `convertToAssets` round-trip, `RegimeDetector.weightsForRegime`
+  across all 256 uint8 regimes, `TradeOnlyAgent.isValidDelegation`
+  field-zero guards, non-canonical signature recovery, and
+  `recordExecution` monotone `usedNotional` + per-venue isolation.
+  256 runs each.
+- **Real Anvil integration** — `solidity/tests/test_deploy_anvil.py`
+  gains a `TestRealAnvil` class and an `AnvilProcess` context manager
+  that spawns a real Anvil subprocess on a high port, waits for
+  `eth_chainId`, and tears down on exit. Four tests: subprocess
+  spawns + serves RPC, deploy three contracts, happy path (reads
+  back asset/keeper/timelockSeconds via `eth_call`), refusal guard
+  still applies for chainId 999.
+- **`deploy.py` bugs caught by real Anvil** — two real bugs surfaced
+  by the integration, neither of which the mock-RPC path caught:
+  1. **RegimeDetector constructor arg missing.** The contract has a
+     1-address constructor (`_feed`), but `deploy.py` passed
+     `constructor_args=None`, so the raw creation bytecode was sent
+     and the constructor saw `address(0)` and reverted with
+     `'zero feed'`. Mock-RPC never executed the constructor so it
+     passed silently. Added `--market-data-feed` CLI flag (default
+     zero) and wired it through both the native EthProvider and
+     web3 paths.
+  2. **YieldAggregator gas limit too low.** The aggregator's ~12 KB
+     initcode needs ~2.6M gas to deploy (200 g/word code deposit +
+     a 4-iter leg-validity loop); the old 2M default caused a
+     silent `'out of gas'` revert. Raised to 4M.
+- **Anvil 1.8.3 default-address change** — Anvil 1.8.3 changed the
+  default funded address from `0x...f39Fd6...` to `0xAE556f...`.
+  Without `--fund-accounts`, the deployer would be unfunded.
+  Documented in the `AnvilProcess` docstring; on Windows the
+  integration always passes `--fund-accounts` to be safe.
+- **Test count: 120 → 152** (round-8, 32 new). `check_repo.py`: 0
+  FAIL.
+
+#### Round-9 (commits `5534c60` + `e01dc1d`)
+
+Round-9 caught five real bugs from the adversarial review and
+documented four spec-accepted responsibility splits. Design-only
+for the remaining KI-1 rate-tracking drift (see
+`DESIGN_KI1_RATE_TRACKING.md`).
+
+- **RegimeDetector hostile-feed hardening** (commit `5534c60`):
+  - **Finding #7** — `hourlyFundingBps * 8760` was an unchecked
+    signed int64 multiply. Solidity 0.8 does not overflow-check
+    signed non-constant-folded expressions, so a hostile feed value
+    > ~2.5e14 silently wrapped around `INT64_MAX`, flipping a
+    positive regime to `FUNDING_NEG` (or vice versa) without any
+    revert. Fix: compute in int256, saturate to `INT64_MAX/MIN`
+    before storing.
+  - **Finding #8** — `(perp - spot) * BPS_DENOM / spot` underflowed
+    on any discount market (`perp < spot`), which Solidity 0.8 turns
+    into a revert, so `observe()` reverted on the most common market
+    state. Fix: handle premium and discount in pure uint256 math
+    (avoiding the uint256→int256 cast which would silently wrap
+    values > 2^255), cap the numerator product at uint256 max /
+    BPS_DENOM, and clamp discounts to 0 to match the existing
+    uint256 snapshot schema. Zero spot/perp now reverts with a
+    recognisable string.
+  - **9 new tests** (7 unit + 1 boundary + 1 fuzz invariant) covering
+    the saturation branch, the discount branch, zero-price guards,
+    and random hostile-feed tuples.
+- **Delegation + aggregator hardening** (commit `e01dc1d`):
+  - **Fix #1 — Non-canonical ECDSA signature rejection.**
+    `TradeOnlyAgent._recover` now rejects `r == 0`, `s == 0`, and
+    `s > secp256k1.order / 2`. *Note: the round-9 task brief
+    supplied `0x7F...57A4501DDFE92F46688B214` as the upper bound.
+    That value is NOT secp256k1.order / 2 — it is ~2^4 shorter
+    (251 bits vs the correct 255) and would reject ~50% of valid
+    canonical signatures. The mathematically correct value is
+    `0x7F...57A4501DDFE92F46681B20A0` (= `(n-1)/2` where
+    `n = 0xFFFF...CD0364141`). Used the correct value; left a
+    comment in `_recover` pointing at the discrepancy.*
+  - **Fix #2 — `recordExecution` enforces `maxPerOrder`.**
+    `require(notional <= d.maxPerOrder, "per-order cap")` in
+    `TradeOnlyAgent.recordExecution`. `DELEGATION_SPEC.md §4`
+    marks this venue-local because the verifier has no view of the
+    intent, but a venue bypassing per-order can silently subvert the
+    delegation's small-orders-only semantics. Reference
+    implementation should enforce it. Two existing tests
+    (`venueCapEnforced`, `perVenueIsolation`) used notional >
+    maxPerOrder to fill the notional cap; adjusted to use two
+    maxPerOrder-sized orders instead.
+  - **Fix #3 — `setTimelock(0)` owner-grief vector.**
+    `require(_ts >= 60, "timelock below 60s")` in YieldAggregator.
+    60s floor prevents same-block request+execute by a compromised
+    keeper; production should tune far higher.
+  - **Fix #4 — `ITradeOnlyAgent.sol` doc sync.** The `expiresAt == 0`
+    sentinel doc now matches FIX-21 (round-3 P0): the field IS the
+    no-expiry sentinel AND the verifier must NOT short-circuit on
+    it (signature, keeper, revocation, other checks still run).
+    Prior wording implied a short-circuit and was technically wrong.
+  - **10 new tests** — canonicality regressions (`test_accept_canonical_signature`,
+    `test_reject_zero_r`, `test_reject_zero_s`, `test_reject_non_canonical_s`),
+    per-order cap (`test_recordExecution_rejects_overPerOrderCap`,
+    `test_recordExecution_accepts_atPerOrderCap`), timelock minimum
+    (`test_setTimelock_rejectsBelowMinimum`,
+    `test_setTimelock_acceptsMinimum`,
+    `test_setTimelock_acceptsHigherValue`,
+    `test_setTimelock_requiresOwner`), and three `FuzzCoverage.t.sol`
+    signatureRecovery fuzz tests updated to expect the new
+    canonicality reverts.
+- **Adversarial review outcome (17 findings total)**:
+  - **5 real fixes applied in round-9** — Fix #1 (canonical sig),
+    Fix #2 (`maxPerOrder` on `recordExecution`), Fix #3 (timelock
+    floor), Finding #7 (int64 saturation), Finding #8 (basis
+    underflow). All closed with regression tests.
+  - **4 spec-accepted responsibility splits documented** (see §2.5
+    KI-9, KI-13, KI-14, and the KI-6 row):
+    - `recordExecution` doesn't verify signature — venue
+      responsibility per `DELEGATION_SPEC.md §4`.
+    - `assetIds` allowlist not verified in writer path — venue
+      responsibility per `AGGREGATOR_SPEC.md §2`.
+    - `_fallbackSig` production reachability — requires compromised
+      keeper + `fundingSource` unwire; tracked for KI-2b Phase 2.
+    - `KI-6` per-delegation aggregate cap — spec tradeoff, already
+      documented in `DELEGATION_SPEC.md §9`.
+  - **2 deferred to design rounds**:
+    - **KI-1 drift** — `khypeBalance` rate-tracking (round-9
+      finding #1/#2, #17). Design at
+      `DESIGN_KI1_RATE_TRACKING.md`; implementation deferred to
+      agent F (round-10 / round-11).
+    - **KI-2b Phase 2** — aggregator refactor for cross-chain intent
+      primitive (blocked on ElysiumCoreWriter shipping).
+- **Test count: 152 → 171** (round-9, 19 new). `check_repo.py`: 0
+  FAIL. `forge test`: 171/171 pass across 13 suites.
+
+Net effect: **171 tests, 0 failed** (`forge test`), **5 round-9
+real bugs fixed**, **4 spec-accepted responsibility splits
+documented**, **2 items deferred to design rounds** (KI-1 drift at
+`DESIGN_KI1_RATE_TRACKING.md`, KI-2b Phase 2 aggregator refactor).
+Only remaining open items: (a) khypeBalance rate-tracking drift
+(design doc exists; implementation deferred), (b) KI-2b Phase 2
+aggregator refactor (blocked on ElysiumCoreWriter), (c) audit (M4
+gate).
+
 ## 3. Kinetiq conversation
 
 **Send this when**: the aggregator sim produces alpha >= 0 on the real
@@ -331,7 +500,7 @@ draft.
 |---|---|
 | **M1: Research artifact** | ✅ Repo + specs + KINETIQ_EMAIL_DRAFT.md (draft, not sent — awaiting Kinetiq contact + GitHub push). |
 | **M2: Testnet deployment** | 🟡 4 leg contracts + aggregator ✅. Round-4 closed KI-3 (BasisHedge dust guard), KI-4 (stale `latestApyBps`), KI-5 (optimistic `_allocatedTotal`). Round-5 closed KI-7 (delegate withdraw collateral) and KI-8 (redeem share-allowance category error). Round-6 closed **KI-1** (stake-leg unit drift — Option A, convert once at boundary). Round-7 closed **KI-2** (`_zeroSig()` writer stub — Option C, hybrid: perp legs accept `submitIntent`). **Only remaining open item**: **KI-6** (per-venue delegation cap — accepted spec tradeoff, documented in `DELEGATION_SPEC.md §9`); see §2.5. |
-| **M3: Audit-ready** | 🟡 Foundry test suite: **120 tests PASS** (RegimeDetector 20, YieldAggregator 34, TradeOnlyAgent 19, Legs 46 across 5 suites: LegsTest 27 + KI1ReconcileTest 7 + KI2PerpFundingTests 6 + KI2BasisHedgeTests 4 + KI2StakingLegsNegativeTest 2, AggInvariantTest 1 campaign with 3 invariants) ✅. Verifier `check_repo.py` 0 FAIL ✅. ERC-4626 math hardened for cancelPending/reentrancy/expiry/weights ✅. Delegate `withdraw`/`redeem` anti-patterns removed (KI-7, KI-8, round-5) ✅. KI-1 stake-leg unit drift fixed (Option A, round-6) ✅. KI-2 `_zeroSig()` writer stub replaced with real `submitIntent` flow (Option C, round-7) ✅. Aggregator invariants: shareValueBounded, weightsSumTo10000, noDoubleCounting (round-7) ✅. **Still to close**: integration coverage against a real `ElysiumCoreWriter` (the MockWriter covers the verifier-verification path, but not the real predeploy), first-depositor & share-allowance fuzz, deploy.py Anvil integration is in-tree but the real Anvil binary is not installed on this machine (mock RPC smoke-tested instead), audit (M4 gate). |
+| **M3: Audit-ready** | 🟡 Foundry test suite: **171 tests PASS across 13 suites** (RegimeDetectorTest 29, YieldAggregatorTest 38, TradeOnlyAgentTest 25, Legs.t.sol 58 across 8 sub-suites: LegsTest 27 + KI1ReconcileTest 7 + KI2PerpFundingTests 6 + KI2BasisHedgeTests 4 + KI5SlippageTests 4 + KI5SlippageGovernanceTests 6 + KI5HarvestAccountingTests 2 + KI2StakingLegsNegativeTest 2, FuzzCoverage 20, AggInvariantTest 1 campaign with 3 invariants) ✅. Verifier `check_repo.py` 0 FAIL ✅. ERC-4626 math hardened for cancelPending/reentrancy/expiry/weights ✅. Delegate `withdraw`/`redeem` anti-patterns removed (KI-7, KI-8, round-5) ✅. KI-1 stake-leg unit drift fixed (Option A, round-6) ✅. KI-2 `_zeroSig()` writer stub replaced with real `submitIntent` flow (Option C, round-7) ✅. Aggregator invariants: shareValueBounded, weightsSumTo10000, noDoubleCounting (round-7) ✅. Round-8: harvest accounting fix (KI-1 §9.2), router slippage guard (KI-1 §9.3), fuzz coverage +20, real Anvil integration caught 2 deploy.py bugs (RegimeDetector constructor arg, gas limit 2M→4M, Anvil 1.8.3 default address change) ✅. Round-9: RegimeDetector hostile-feed hardening (int64 saturation, basis underflow), delegation canonical sig rejection, `recordExecution` enforces `maxPerOrder`, `setTimelock` minimum 60s, `ITradeOnlyAgent` doc sync ✅. Adversarial review (17 findings): 5 real fixes applied, 4 spec-accepted responsibility splits documented (KI-6, KI-9, KI-13, KI-14), 2 deferred to design rounds ✅. **Still to close**: (a) `khypeBalance` / `rewardHypeBalance` rate-tracking drift — design doc exists at `DESIGN_KI1_RATE_TRACKING.md` (recommended option A, closes round-9 finding #1/#2 + #17), implementation deferred to agent F (round-10 / round-11); (b) KI-2b Phase 2 aggregator refactor — blocked on ElysiumCoreWriter shipping; (c) integration coverage against a real `ElysiumCoreWriter` (the MockWriter covers the verifier-verification path, but not the real predeploy); (d) first-depositor & share-allowance fuzz; (e) audit (M4 gate). |
 | **M4: Mainnet** | ⬜ Audit passed. Governance live. First 100k USD TVL. |
 
 ## 5. Leg TODOs (in-code)

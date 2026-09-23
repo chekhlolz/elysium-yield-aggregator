@@ -530,7 +530,46 @@ These were surfaced while analysing KI-1 but should be separate issues:
   `currentValue()`.
 - **Router slippage of 0** on both legs (`KHYPELeg.sol:25-26`,
   `SpotStakingLeg.sol:27`) — orthogonal to KI-1 but should be added
-  in the same round-5 hardening pass.
+  in the same round-5 hardening pass. **CLOSED in round-8** (commit
+  `e38d117`): the `slippageBps` guard is now live on both legs.
+
+---
+
+### §9.4 (added 2026-09-22, round-9): `khypeBalance` rate-tracking
+drift — semantic-root bug, tracked separately
+
+Round-9 adversarial review (finding #1/#2, finding #17) surfaced a
+deeper KI-1 bug that §9 above originally flagged only as adjacent.
+The short version:
+
+- `khypeBalance` / `rewardHypeBalance` is tracked in **HYPE-input
+  units** (`khypeBalance += hypeIn` at `KHYPELeg.sol:181`), but the
+  pool holds **stake tokens** (`hypeIn × pool.exchangeRate() / 1e18`).
+- `reduceFrom` decrements `khypeBalance` by a HYPE amount
+  (`KHYPELeg.sol:228`) while `pool.unstake` burns a stake-token
+  amount (`KHYPELeg.sol:236`).
+- On any `pool.exchangeRate()` move, the ledger and the pool's book
+  diverge by the rate delta. Concrete: stake 200 HYPE @ rate 1.0,
+  rate rises to 1.2, `reduceFrom` 100 USDC → pool burns 120 stake
+  tokens, ledger decrements 100 (HYPE). Ledger claims 110, pool
+  holds 105.6. Compounds on every subsequent reduce.
+- The KI-1 comment at `KHYPELeg.sol:125-130` /
+  `SpotStakingLeg.sol:126-130` describes an intent ("the
+  `pool.exchangeRate()` factor is folded in at the boundary
+  (allocateTo)") that the code does not implement. Finding #17.
+
+This is now the **semantic-root bug** — the round-6 KI-1 fix
+resolved the USDC-vs-HYPE unit dominance in the `amount` parameter,
+but assumed `khypeBalance` and the pool's stake-token balance were
+in the same unit. They are not.
+
+Tracked as **`docs/DESIGN_KI1_RATE_TRACKING.md`** (new, round-9).
+Recommended option A: redefine `khypeBalance` as a stake-token count
+and re-apply the live rate in `currentValue()`. Implementation
+deferred to a follow-up commit (agent F, round-10 / round-11).
+
+Status: **design proposed, pending approval**. Not implemented in
+this round.
 
 ---
 
