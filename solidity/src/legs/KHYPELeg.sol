@@ -118,7 +118,7 @@ contract KHYPELeg is IYieldLeg {
         uint256 v = 0;
         if (khypeBalance > 0) {
             uint256 price = _hypePriceUsdc();
-            v = (khypeBalance * price) / 1e6;
+            v = (khypeBalance * price) / 1_000_000;
         }
         v += usdc.balanceOf(address(this));
         return v;

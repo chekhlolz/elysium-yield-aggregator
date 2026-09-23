@@ -118,7 +118,7 @@ contract SpotStakingLeg is IYieldLeg {
         uint256 v = 0;
         if (rewardHypeBalance > 0) {
             uint256 price = _hypePriceUsdc();
-            v = (rewardHypeBalance * price) / 1e6;
+            v = (rewardHypeBalance * price) / 1_000_000;
         }
         v += usdc.balanceOf(address(this));
         return v;
