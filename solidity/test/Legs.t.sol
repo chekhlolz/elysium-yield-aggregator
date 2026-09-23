@@ -283,8 +283,8 @@ contract LegsTest is Test {
 // the boundary). Both stake legs must reconcile USDC <-> HYPE
 // explicitly on every mutation; khypeBalance is tracked in HYPE
 // units (18 dec), and pool.unstake must receive a stake-token
-# amount derived via the live pool.exchangeRate(), never a raw
-# USDC amount.
+// amount derived via the live pool.exchangeRate(), never a raw
+// USDC amount.
 // ==================================================================
 
 // ---- Mocks ----
@@ -339,25 +339,25 @@ contract MockRouter is IERC20Router {
     function swapExactUSDCForToken(address, uint256 amountIn) external override returns (uint256 outAmount) {
         uint256 p = oracle.hypePriceUsdc();
         require(p > 0, "no price");
-        outAmount = (amountIn * 1e18) / p;
+        outAmount = (amountIn * 1_000_000_000_000_000_000) / p;
         require(hype.balanceOf(address(this)) >= outAmount, "no hype out");
         hype.transfer(msg.sender, outAmount);
     }
     function swapExactTokenForUSDC(address, uint256 hypeIn) external override returns (uint256 outAmount) {
         uint256 p = oracle.hypePriceUsdc();
         require(p > 0, "no price");
-        outAmount = (hypeIn * p) / 1e18;
+        outAmount = (hypeIn * p) / 1_000_000_000_000_000_000;
         require(hype.balanceOf(msg.sender) >= hypeIn, "no hype in");
         hype.transferFrom(msg.sender, address(this), hypeIn);
         usdc.mint(msg.sender, outAmount);
     }
     function getAmountOut(address, address, uint256 amountIn) external view override returns (uint256) {
-        return (amountIn * 1e18) / oracle.hypePriceUsdc();
+        return (amountIn * 1_000_000_000_000_000_000) / oracle.hypePriceUsdc();
     }
 }
 
 contract MockStakingPool is IStakingPool {
-    uint256 public constant RATE_18 = 1e18;
+    uint256 public constant RATE_18 = 1_000_000_000_000_000_000;
     mapping(address => uint256) public staked;
     MockHYPE public hype;
     constructor(MockHYPE _hype) { hype = _hype; }
@@ -405,7 +405,7 @@ contract KI1ReconcileTest is Test {
         oracle = new MockPriceOracle(PRICE_200);
         router = new MockRouter(usdc, hype, oracle);
         pool   = new MockStakingPool(hype);
-        hype.mint(address(router), 1_000_000 * 1e18);
+        hype.mint(address(router), 1_000_000 * 1_000_000_000_000_000_000);
         usdc.mint(OWNER, 1_000_000 * 1_000 * 1_000);
     }
 
@@ -435,7 +435,7 @@ contract KI1ReconcileTest is Test {
         uint256 returned = leg.allocateTo(USD_1000);
         vm.stopPrank();
         assertEq(returned, USD_1000, "allocateTo returned");
-        assertEq(leg.khypeBalance(), 500 * 1e18, "khypeBalance in HYPE units");
+        assertEq(leg.khypeBalance(), 500 * 1_000_000_000_000_000_000, "khypeBalance in HYPE units");
         assertEq(leg.allocatedUsd(), USD_1000, "allocatedUsd ledger");
         assertEq(leg.currentValue(), USD_1000, "currentValue at fixed price");
     }
@@ -446,15 +446,15 @@ contract KI1ReconcileTest is Test {
         leg.allocateTo(USD_1000);
         vm.stopPrank();
         uint256 beforeUnstaked = pool.staked(address(leg));
-        assertEq(beforeUnstaked, 500 * 1e18, "pool staked after allocate");
+        assertEq(beforeUnstaked, 500 * 1_000_000_000_000_000_000, "pool staked after allocate");
         vm.startPrank(OWNER);
         uint256 returned = leg.reduceFrom(USD_500);
         vm.stopPrank();
-        assertEq(beforeUnstaked - pool.staked(address(leg)), 250 * 1e18,
+        assertEq(beforeUnstaked - pool.staked(address(leg)), 250 * 1_000_000_000_000_000_000,
                  "pool unstaked the right stake-token amount");
         assertEq(returned, USD_500, "USDC returned to owner");
         assertEq(leg.allocatedUsd(), USD_500, "allocatedUsd dropped by reduce");
-        assertEq(leg.khypeBalance(), 250 * 1e18, "khypeBalance in HYPE units");
+        assertEq(leg.khypeBalance(), 250 * 1_000_000_000_000_000_000, "khypeBalance in HYPE units");
     }
 
     function test_KI1_KHYPELeg_currentValue_re_rates_after_oracle_repricing() public {
@@ -462,16 +462,16 @@ contract KI1ReconcileTest is Test {
         vm.startPrank(OWNER);
         leg.allocateTo(USD_1000);
         vm.stopPrank();
-        assertEq(leg.khypeBalance(), 500 * 1e18, "khypeBalance after allocate");
+        assertEq(leg.khypeBalance(), 500 * 1_000_000_000_000_000_000, "khypeBalance after allocate");
         assertEq(leg.currentValue(), USD_1000, "currentValue at $2.00");
         oracle.setPrice(PRICE_250);
-        assertEq(leg.khypeBalance(), 500 * 1e18, "khypeBalance unchanged on price drift");
+        assertEq(leg.khypeBalance(), 500 * 1_000_000_000_000_000_000, "khypeBalance unchanged on price drift");
         assertEq(leg.currentValue(), 1_250_000_000, "currentValue at $2.50 = 500 * 2.50");
         vm.startPrank(OWNER);
         uint256 returned = leg.reduceFrom(USD_500);
         vm.stopPrank();
         assertEq(returned, USD_500, "returned at new price");
-        assertEq(leg.khypeBalance(), 300 * 1e18, "residual khypeBalance in HYPE units");
+        assertEq(leg.khypeBalance(), 300 * 1_000_000_000_000_000_000, "residual khypeBalance in HYPE units");
         assertEq(leg.currentValue(), 750_000_000, "currentValue = 300 HYPE @ $2.50");
     }
 
@@ -480,11 +480,11 @@ contract KI1ReconcileTest is Test {
         vm.startPrank(OWNER);
         leg.allocateTo(USD_1000);
         vm.stopPrank();
-        assertEq(leg.khypeBalance(), 500 * 1e18);
+        assertEq(leg.khypeBalance(), 500 * 1_000_000_000_000_000_000);
         vm.startPrank(OWNER);
         leg.reduceFrom(USD_500);
         vm.stopPrank();
-        assertEq(leg.khypeBalance(), 250 * 1e18,
+        assertEq(leg.khypeBalance(), 250 * 1_000_000_000_000_000_000,
                  "khypeBalance dropped by the HYPE equivalent, not the raw USDC");
     }
 
@@ -494,7 +494,7 @@ contract KI1ReconcileTest is Test {
         uint256 returned = leg.allocateTo(USD_1000);
         vm.stopPrank();
         assertEq(returned, USD_1000);
-        assertEq(leg.rewardHypeBalance(), 500 * 1e18, "rewardHypeBalance in HYPE units");
+        assertEq(leg.rewardHypeBalance(), 500 * 1_000_000_000_000_000_000, "rewardHypeBalance in HYPE units");
         assertEq(leg.allocatedUsd(), USD_1000);
         assertEq(leg.currentValue(), USD_1000);
     }
@@ -505,14 +505,14 @@ contract KI1ReconcileTest is Test {
         leg.allocateTo(USD_1000);
         vm.stopPrank();
         uint256 before = pool.staked(address(leg));
-        assertEq(before, 500 * 1e18);
+        assertEq(before, 500 * 1_000_000_000_000_000_000);
         vm.startPrank(OWNER);
         uint256 returned = leg.reduceFrom(USD_500);
         vm.stopPrank();
-        assertEq(before - pool.staked(address(leg)), 250 * 1e18,
+        assertEq(before - pool.staked(address(leg)), 250 * 1_000_000_000_000_000_000,
                  "unstaked the right stake-token amount");
         assertEq(returned, USD_500);
-        assertEq(leg.rewardHypeBalance(), 250 * 1e18, "rewardHypeBalance in HYPE units");
+        assertEq(leg.rewardHypeBalance(), 250 * 1_000_000_000_000_000_000, "rewardHypeBalance in HYPE units");
         assertEq(leg.allocatedUsd(), USD_500);
     }
 
@@ -521,10 +521,10 @@ contract KI1ReconcileTest is Test {
         vm.startPrank(OWNER);
         leg.allocateTo(USD_1000);
         vm.stopPrank();
-        assertEq(leg.rewardHypeBalance(), 500 * 1e18);
+        assertEq(leg.rewardHypeBalance(), 500 * 1_000_000_000_000_000_000);
         assertEq(leg.currentValue(), USD_1000);
         oracle.setPrice(PRICE_250);
-        assertEq(leg.rewardHypeBalance(), 500 * 1e18);
+        assertEq(leg.rewardHypeBalance(), 500 * 1_000_000_000_000_000_000);
         assertEq(leg.currentValue(), 1_250_000_000, "currentValue at $2.50");
     }
 }

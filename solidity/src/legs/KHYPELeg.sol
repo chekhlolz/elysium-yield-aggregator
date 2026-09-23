@@ -133,7 +133,7 @@ contract KHYPELeg is IYieldLeg {
         // currentValue() then collapses to `khypeBalance * price`.
         uint256 price = _hypePriceUsdc();
         require(price > 0, "no oracle price");
-        uint256 hypeEquivalent = (usdAmount * 1e18) / price;
+        uint256 hypeEquivalent = (usdAmount * 1_000_000_000_000_000_000) / price;
 
         uint256 hypeIn = router.swapExactUSDCForToken(address(hype), usdAmount);
         require(hypeIn > 0, "router returned 0");
@@ -169,9 +169,10 @@ contract KHYPELeg is IYieldLeg {
         // current exchangeRate(). Call pool.unstake with the stake-
         // token amount -- never with the raw USDC amount.
         require(usdAmount > 0, "bad amount");
+        require(khypeBalance > 0, "bad amount");
         uint256 price = _hypePriceUsdc();
         require(price > 0, "no oracle price");
-        uint256 hypeAmount = (usdAmount * 1e18) / price;
+        uint256 hypeAmount = (usdAmount * 1_000_000_000_000_000_000) / price;
         require(khypeBalance >= hypeAmount, "bad amount");
 
         khypeBalance -= hypeAmount;
@@ -179,7 +180,7 @@ contract KHYPELeg is IYieldLeg {
         // Convert HYPE amount to stake tokens via the live pool rate.
         uint256 rate = pool.exchangeRate();
         require(rate > 0, "pool rate is 0");
-        uint256 stakeTokenAmount = (hypeAmount * rate) / 1e18;
+        uint256 stakeTokenAmount = (hypeAmount * rate) / 1_000_000_000_000_000_000;
         require(stakeTokenAmount > 0, "zero stake amount");
 
         pool.unstake(address(this), stakeTokenAmount);
