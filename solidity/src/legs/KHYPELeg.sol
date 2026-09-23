@@ -22,8 +22,9 @@ import "../interfaces/IPriceOracle.sol";
  * Venue: HyperCore kHYPE staking pool.
  *
  * Known limitations:
- *   - Router slippage is fixed at 0 for minOut; production needs a
- *     slippage-bps param tuned per venue.
+ *   - Router slippage is enforced via `slippageBps` against the oracle
+ *     price AFTER the swap returns (round-8 hardening); the router
+ *     interface itself still has no `minOut` parameter. Tune per venue.
  *   - The unbonding period may be non-zero; while unbonding is pending,
  *     reduceFrom() returns 0 and the aggregator must call `claimPending`
  *     once the clock has run.
@@ -60,6 +61,16 @@ contract KHYPELeg is IYieldLeg {
     //       wired on Elysium. Used whenever oracle == address(0).
     uint256 public fixedApyBps;
 
+    // Round-8 hardening: slippage ceiling enforced against the oracle
+    // price AFTER `router.swapExactUSDCForToken` returns. The router
+    // interface has no `minOut` param, so we bound slippage on the
+    // return value: `hypeIn >= (usdAmount * 1e18 * (10000 - slippageBps))
+    //                    / (price * 10000)` is required to hold.
+    //
+    // 0 disables the guard (used by tests that pin exact fills);
+    // 100 (1%) is the recommended production default.
+    uint256 public slippageBps;
+
     struct Observation {
         uint64 ts;
         uint256 apyBps;
@@ -75,8 +86,10 @@ contract KHYPELeg is IYieldLeg {
         address _router,
         address _pool,
         address _oracle,
-        uint256 _fixedApyBps
+        uint256 _fixedApyBps,
+        uint256 _slippageBps
     ) {
+        require(_slippageBps <= BPS_DENOM, "slippageBps > 100%");
         owner = msg.sender;
         usdc   = IERC20Minimal(_usdc);
         hype   = IERC20Minimal(_hype);
@@ -85,6 +98,7 @@ contract KHYPELeg is IYieldLeg {
         oracle = IPriceOracle(_oracle);
         fixedApyBps = _fixedApyBps;
         latestApyBps = _fixedApyBps;
+        slippageBps = _slippageBps;
     }
 
     // ---- IYieldLeg ----
@@ -133,11 +147,33 @@ contract KHYPELeg is IYieldLeg {
         // KI-1 (Option A): convert USDC -> HYPE at the live oracle
         // price, and track the HYPE-equivalent for the on-book balance.
         // currentValue() then collapses to `khypeBalance * price`.
+        //
+        // NOTE (§9.1 of DESIGN_KI1_UNIT_RECONCILE): khypeBalance is
+        // incremented by the ROUTER RETURN VALUE (`hypeIn`), not by
+        // `pool.balanceOf(...)`. The pool's total balance includes all
+        // prior stakes, so adding it would double-count on repeat
+        // allocations. This is the round-6 fix.
         uint256 price = _hypePriceUsdc();
         require(price > 0, "no oracle price");
 
         uint256 hypeIn = router.swapExactUSDCForToken(address(hype), usdAmount);
         require(hypeIn > 0, "router returned 0");
+
+        // Round-8 hardening: bound slippage against the oracle price.
+        // The router returns `(usdAmount * 1e18) / price` HYPE (18-dec),
+        // matching the live MockRouter / prod router convention. So the
+        // expected oracle fill is:
+        //   expectedHype = (usdAmount * 1e18) / price
+        // and the acceptable floor is:
+        //   hypeMin = (usdAmount * 1e18 * (BPS_DENOM - slippageBps))
+        //             / (price * BPS_DENOM)
+        // slippageBps == 0 means "no guard" (tests with exact fills).
+        if (slippageBps > 0) {
+            uint256 hypeMin = (usdAmount * 1_000_000_000_000_000_000
+                               * (BPS_DENOM - slippageBps))
+                              / (price * BPS_DENOM);
+            require(hypeIn >= hypeMin, "slippage exceeded");
+        }
 
         hype.safeApprove(address(pool), hypeIn);
         pool.stake(address(hype), hypeIn);
@@ -150,12 +186,21 @@ contract KHYPELeg is IYieldLeg {
         return usdAmount;
     }
 
-    /** kHYPE accrues through exchange rate — no claim(); only USDC sweep. */
+    /**
+     * kHYPE accrues through exchange rate — no claim(); only USDC sweep.
+     *
+     * Round-8 fix: harvest() does NOT decrement `allocatedUsd`. The
+     * realised USDC yield is swept to the owner, but the vault's
+     * principal ledger tracks the underlying HYPE position, not the
+     * realised reward. Decrementing would drift the aggregator's
+     * `_allocatedTotal` downward by the yield amount on the next
+     * `harvestFromAllLegs()` refresh (see §5.3 / §9.2 of
+     * DESIGN_KI1_UNIT_RECONCILE).
+     */
     function harvest() external nonReentrant {
         require(msg.sender == owner, "not owner");
         uint256 u = usdc.balanceOf(address(this));
         if (u > 0) {
-            if (allocatedUsd >= u) allocatedUsd -= u; else allocatedUsd = 0;
             usdc.safeTransfer(owner, u);
             emit Harvested(u);
         }
@@ -231,6 +276,15 @@ contract KHYPELeg is IYieldLeg {
     function setFixedApyBps(uint256 v) external onlyOwner {
         fixedApyBps = v;
         if (address(oracle) == address(0)) latestApyBps = v;
+    }
+
+    /** Governance: change the slippage ceiling in basis points.
+     *  0 disables the guard entirely (used in tests with exact-fill
+     *  mocks); 100 (1%) is the recommended production default.
+     */
+    function setSlippageBps(uint256 v) external onlyOwner {
+        require(v <= BPS_DENOM, "slippageBps > 100%");
+        slippageBps = v;
     }
 
     // ---- Internals ----

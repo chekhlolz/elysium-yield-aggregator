@@ -157,12 +157,12 @@ mock-friendly dependency interface. See `docs/ROADMAP.md §5` for the
 | YieldAggregator | 12 151 | 10 979 | Vault + keeper + timelock |
 | TradeOnlyAgent | 2 839 | 2 811 | EIP-712 delegation |
 | RegimeDetector | 2 926 | 2 650 | Market-data adapter |
-| KHYPELeg | 7 495 | 6 918 | kHYPE LST leg |
-| SpotStakingLeg | 7 503 | 6 926 | Spot-staking leg |
+| KHYPELeg | 7 899 | 7 220 | kHYPE LST leg |
+| SpotStakingLeg | 7 922 | 7 243 | Spot-staking leg |
 | PerpFundingLeg | 7 775 | 7 140 | Perp-funding leg |
 | BasisHedgeLeg | 7 576 | 6 988 | Basis-hedge leg |
 
-Total: **~46.5 KB** across all contracts (including the `SafeERC20`
+Total: **~47.2 KB** across all contracts (including the `SafeERC20`
 library and `RegimeId` enum). Per-contract, the largest is
 `YieldAggregator` at 12.4 KB creation — well under the 24 KB EVM
 contract-size cap. The "300 Mgas/s execution budget" figure in the

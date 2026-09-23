@@ -34,11 +34,14 @@ contract LegsTest is Test {
         // All optional integrations wired to non-zero addresses so the
         // leg's `address(x) == address(0)` checks are false and we
         // exercise the production paths.
-        return new KHYPELeg(TOKEN, TOKEN, TOKEN, POOL, address(0), 1000);
+        // Round-8: slippageBps = 0 in this rig (oracle is unwired so
+        // the slippage check is a no-op, but we pin 0 to keep the
+        // intent explicit).
+        return new KHYPELeg(TOKEN, TOKEN, TOKEN, POOL, address(0), 1000, 0);
     }
 
     function _deploySpot() internal returns (SpotStakingLeg) {
-        return new SpotStakingLeg(TOKEN, TOKEN, TOKEN, POOL, address(0), 1000);
+        return new SpotStakingLeg(TOKEN, TOKEN, TOKEN, POOL, address(0), 1000, 0);
     }
 
     function _deployPerp() internal returns (PerpFundingLeg) {
@@ -361,6 +364,59 @@ contract MockRouter is IERC20Router {
     }
 }
 
+/// Round-8 slippage-hardening mock: swaps on a price that drifts
+/// away from the oracle price by `swapSlippageBps`, so the leg's
+/// post-swap require can be exercised in both directions (accept
+/// within tolerance, revert above tolerance). The oracle itself
+/// keeps returning the unadjusted price, matching a realistic
+/// "oracle is right, router is the wrong quote" scenario.
+contract SlippageMockRouter is IERC20Router {
+    MockUSDC public usdc;
+    MockHYPE public hype;
+    MockPriceOracle public oracle;
+    uint256 public swapSlippageBps;
+
+    constructor(MockUSDC _usdc, MockHYPE _hype, MockPriceOracle _oracle) {
+        usdc = _usdc; hype = _hype; oracle = _oracle;
+    }
+
+    function setSwapSlippageBps(uint256 v) external { swapSlippageBps = v; }
+
+    /// Effective unit price is `oracle * (10000 + swapSlippageBps) / 10000`,
+    /// so the router returns fewer HYPE per USDC than the oracle
+    /// rate would predict -- slippage in our unfavour.
+    function swapExactUSDCForToken(address, uint256 amountIn)
+        external override returns (uint256 outAmount)
+    {
+        uint256 p = oracle.hypePriceUsdc();
+        require(p > 0, "no price");
+        uint256 effP = (swapSlippageBps > 0)
+            ? (p * (10_000 + swapSlippageBps)) / 10_000
+            : p;
+        require(effP > 0, "eff price is 0");
+        outAmount = (amountIn * 1_000_000_000_000_000_000) / effP;
+        require(hype.balanceOf(address(this)) >= outAmount, "no hype out");
+        hype.transfer(msg.sender, outAmount);
+    }
+
+    function swapExactTokenForUSDC(address, uint256 hypeIn)
+        external override returns (uint256 outAmount)
+    {
+        uint256 p = oracle.hypePriceUsdc();
+        require(p > 0, "no price");
+        outAmount = (hypeIn * p) / 1_000_000_000_000_000_000;
+        require(hype.balanceOf(msg.sender) >= hypeIn, "no hype in");
+        hype.transferFrom(msg.sender, address(this), hypeIn);
+        usdc.mint(msg.sender, outAmount);
+    }
+
+    function getAmountOut(address, address, uint256 amountIn)
+        external view override returns (uint256)
+    {
+        return (amountIn * 1_000_000_000_000_000_000) / oracle.hypePriceUsdc();
+    }
+}
+
 contract MockStakingPool is IStakingPool {
     uint256 public constant RATE_18 = 1_000_000_000_000_000_000;
     mapping(address => uint256) public staked;
@@ -418,7 +474,7 @@ contract KI1ReconcileTest is Test {
         vm.startPrank(OWNER);
         KHYPELeg leg = new KHYPELeg(address(usdc), address(hype),
                                      address(router), address(pool),
-                                     address(oracle), 1000);
+                                     address(oracle), 1000, 0);
         usdc.approve(address(router), type(uint256).max);
         vm.stopPrank();
         return leg;
@@ -428,7 +484,7 @@ contract KI1ReconcileTest is Test {
         vm.startPrank(OWNER);
         SpotStakingLeg leg = new SpotStakingLeg(address(usdc), address(hype),
                                                  address(router), address(pool),
-                                                 address(oracle), 1000);
+                                                 address(oracle), 1000, 0);
         usdc.approve(address(router), type(uint256).max);
         vm.stopPrank();
         return leg;
@@ -712,14 +768,14 @@ abstract contract KI2Base is Test {
     function _deployKHYPE() internal returns (KHYPELeg) {
         return new KHYPELeg(
             address(usdcTok), address(hypeTok), address(0),
-            address(0), address(oracleMock), 1000
+            address(0), address(oracleMock), 1000, 0
         );
     }
 
     function _deploySpot() internal returns (SpotStakingLeg) {
         return new SpotStakingLeg(
             address(usdcTok), address(hypeTok), address(0),
-            address(0), address(oracleMock), 1000
+            address(0), address(oracleMock), 1000, 0
         );
     }
 
@@ -983,6 +1039,299 @@ contract KI2StakingLegsNegativeTest is KI2Base {
         SpotStakingLeg leg = _deploySpot();
         assertFalse(_hasSelector(address(leg), SUBMIT_SELECTOR),
                     "SpotStakingLeg does NOT expose submitIntent selector");
+    }
+}
+
+// ==================================================================
+// Round-8 hardening (KI-1 §9.2 + §9.3 follow-ups).
+//
+//   (a) harvest() must NOT decrement `allocatedUsd` — the realised
+//       USDC sweep is yield; the vault's principal ledger tracks
+//       the underlying HYPE position, not realised reward.
+//   (b) Router slippage must be bounded via `slippageBps` against
+//       the oracle price AFTER the swap returns, and the owner
+//       must be able to tune that knob.
+//
+// MockRouter above now has an optional `SlippageMockRouter` variant
+// whose effective price is `oracle * (10000 + swapSlippageBps) / 10000`
+// — simulating a real swap executing at a worse rate than the
+// oracle. Combined with `slippageBps` on the leg itself, that lets
+// us exercise both the accept-within-tolerance path and the
+// reject-above-tolerance path.
+// ==================================================================
+
+abstract contract KI5Base is Test {
+    address internal constant KI5_OWNER = address(0x1111);
+    address internal constant KI5_ALICE = address(0x2222);
+
+    MockUSDC internal usdc;
+    MockHYPE internal hype;
+    MockPriceOracle internal oracle;
+    MockRouter internal router;
+    MockStakingPool internal pool;
+
+    uint256 internal constant KI5_PRICE_200 = 2_000_000;
+    uint256 internal constant KI5_USD_1000 = 1_000 * 1_000_000;
+
+    function setUp() public virtual {
+        usdc   = new MockUSDC();
+        hype   = new MockHYPE();
+        oracle = new MockPriceOracle(KI5_PRICE_200);
+        router = new MockRouter(usdc, hype, oracle);
+        pool   = new MockStakingPool(hype);
+        hype.mint(address(router), 1_000_000 * 1_000_000_000_000_000_000);
+        usdc.mint(KI5_OWNER, 1_000_000 * 1_000 * 1_000);
+    }
+
+    /// @param bps Slippage ceiling in bps. 0 disables the guard.
+    function _deployKHYPE(uint256 bps) internal returns (KHYPELeg) {
+        vm.startPrank(KI5_OWNER);
+        KHYPELeg leg = new KHYPELeg(address(usdc), address(hype),
+                                     address(router), address(pool),
+                                     address(oracle), 1000, bps);
+        usdc.approve(address(router), type(uint256).max);
+        vm.stopPrank();
+        return leg;
+    }
+
+    /// @param bps Slippage ceiling in bps. 0 disables the guard.
+    function _deploySpot(uint256 bps) internal returns (SpotStakingLeg) {
+        vm.startPrank(KI5_OWNER);
+        SpotStakingLeg leg = new SpotStakingLeg(address(usdc), address(hype),
+                                                 address(router), address(pool),
+                                                 address(oracle), 1000, bps);
+        usdc.approve(address(router), type(uint256).max);
+        vm.stopPrank();
+        return leg;
+    }
+}
+
+/// (a) Regression: harvest() does not touch `allocatedUsd`. The
+/// sweep moves USDC out, but the underlying HYPE position is
+/// unchanged, so the principal ledger must be too. Without the fix
+/// a USDC-sweep of $1000 would have silently drained `allocatedUsd`
+/// from $1000 to $0, drifting the aggregator's `_allocatedTotal`
+/// downward by the same amount on the next harvestFromAllLegs.
+contract KI5HarvestAccountingTests is KI5Base {
+    function test_harvest_doesNotDecrement_allocatedUsd_KHYPE() public {
+        KHYPELeg leg = _deployKHYPE(0);
+
+        vm.startPrank(KI5_OWNER);
+        usdc.transfer(address(leg), KI5_USD_1000);
+        leg.allocateTo(KI5_USD_1000);
+        vm.stopPrank();
+        assertEq(leg.allocatedUsd(), KI5_USD_1000, "allocatedUsd after allocate");
+
+        // Simulate a USDC balance sitting in the leg. In production this
+        // comes from a swap residual or a delayed reward transfer; in
+        // the mock it just means someone sent USDC to the leg.
+        vm.prank(KI5_OWNER);
+        usdc.transfer(address(leg), KI5_USD_1000);
+
+        vm.prank(KI5_OWNER);
+        leg.harvest();
+
+        assertEq(leg.allocatedUsd(), KI5_USD_1000,
+                 "harvest() must NOT decrement allocatedUsd");
+        assertEq(usdc.balanceOf(address(leg)), 0, "USDC swept");
+        // currentValue reflects the HYPE position via oracle * price;
+        // the swept USDC does not re-rate it.
+        assertEq(leg.currentValue(), KI5_USD_1000,
+                 "currentValue unchanged by harvest");
+    }
+
+    function test_harvest_doesNotDecrement_allocatedUsd_SpotStaking() public {
+        SpotStakingLeg leg = _deploySpot(0);
+
+        vm.startPrank(KI5_OWNER);
+        usdc.transfer(address(leg), KI5_USD_1000);
+        leg.allocateTo(KI5_USD_1000);
+        vm.stopPrank();
+        assertEq(leg.allocatedUsd(), KI5_USD_1000, "allocatedUsd after allocate");
+
+        vm.prank(KI5_OWNER);
+        usdc.transfer(address(leg), KI5_USD_1000);
+
+        vm.prank(KI5_OWNER);
+        leg.harvest();
+
+        assertEq(leg.allocatedUsd(), KI5_USD_1000,
+                 "harvest() must NOT decrement allocatedUsd");
+        assertEq(usdc.balanceOf(address(leg)), 0, "USDC swept");
+        assertEq(leg.currentValue(), KI5_USD_1000,
+                 "currentValue unchanged by harvest");
+    }
+}
+
+/// (b) Slippage guard: the leg bounds the router's returned amount
+/// against the oracle price. SlippageMockRouter above lets us
+/// simulate a real swap executing at a worse rate than the oracle.
+///
+/// This contract holds its own SlippageMockRouter (as a typed
+/// reference) rather than reusing KI5Base's MockRouter storage slot,
+/// because the two share no methods -- a cross-type cast would
+/// revert on any call.
+contract KI5SlippageTests is Test {
+    address constant OWNER = address(0x1111);
+
+    MockUSDC usdc;
+    MockHYPE hype;
+    MockPriceOracle oracle;
+    SlippageMockRouter router;
+    MockStakingPool pool;
+
+    uint256 constant PRICE_200 = 2_000_000;
+    uint256 constant USD_1000 = 1_000 * 1_000_000;
+
+    function setUp() public {
+        usdc   = new MockUSDC();
+        hype   = new MockHYPE();
+        oracle = new MockPriceOracle(PRICE_200);
+        router = new SlippageMockRouter(usdc, hype, oracle);
+        pool   = new MockStakingPool(hype);
+        hype.mint(address(router), 1_000_000 * 1_000_000_000_000_000_000);
+        usdc.mint(OWNER, 1_000_000 * 1_000 * 1_000);
+    }
+
+    function _deployKHYPE(uint256 bps) internal returns (KHYPELeg) {
+        vm.startPrank(OWNER);
+        KHYPELeg leg = new KHYPELeg(address(usdc), address(hype),
+                                     address(router), address(pool),
+                                     address(oracle), 1000, bps);
+        usdc.approve(address(router), type(uint256).max);
+        vm.stopPrank();
+        return leg;
+    }
+
+    function _deploySpot(uint256 bps) internal returns (SpotStakingLeg) {
+        vm.startPrank(OWNER);
+        SpotStakingLeg leg = new SpotStakingLeg(address(usdc), address(hype),
+                                                 address(router), address(pool),
+                                                 address(oracle), 1000, bps);
+        usdc.approve(address(router), type(uint256).max);
+        vm.stopPrank();
+        return leg;
+    }
+
+    /// Leg tolerance 50 bps (0.5%), router drift 100 bps (1.0%) --
+    /// the returned amount under-shoots the oracle-based floor, so
+    /// the guard must trip.
+    function test_allocateTo_reverts_onSlippageExceeded_KHYPE() public {
+        KHYPELeg leg = _deployKHYPE(50);
+        router.setSwapSlippageBps(100);
+
+        vm.startPrank(OWNER);
+        usdc.transfer(address(leg), USD_1000);
+        vm.expectRevert(bytes("slippage exceeded"));
+        leg.allocateTo(USD_1000);
+        vm.stopPrank();
+    }
+
+    /// Same scenario for the spot-staking leg.
+    function test_allocateTo_reverts_onSlippageExceeded_Spot() public {
+        SpotStakingLeg leg = _deploySpot(50);
+        router.setSwapSlippageBps(100);
+
+        vm.startPrank(OWNER);
+        usdc.transfer(address(leg), USD_1000);
+        vm.expectRevert(bytes("slippage exceeded"));
+        leg.allocateTo(USD_1000);
+        vm.stopPrank();
+    }
+
+    /// The mirror image: the router returns a fill at the oracle
+    /// price (no drift), so the guard is a no-op and allocateTo
+    /// proceeds normally. Pins the "don't over-reject" side of the
+    /// guard -- without this test a `<=` vs `<` typo would slip
+    /// through.
+    function test_allocateTo_proceeds_when_withinSlippage_KHYPE() public {
+        KHYPELeg leg = _deployKHYPE(50);
+        router.setSwapSlippageBps(0);
+
+        vm.startPrank(OWNER);
+        usdc.transfer(address(leg), USD_1000);
+        leg.allocateTo(USD_1000);
+        vm.stopPrank();
+        assertEq(leg.allocatedUsd(), USD_1000, "allocation went through");
+        assertEq(leg.khypeBalance(), 500 * 1_000_000_000_000_000_000,
+                 "khypeBalance at oracle rate");
+    }
+
+    /// slippageBps == 0 disables the guard. Existing tests already
+    /// rely on this; pin it explicitly so anyone changing the
+    /// semantics notices.
+    function test_allocateTo_slippageBps_zero_disablesGuard_KHYPE() public {
+        KHYPELeg leg = _deployKHYPE(0);
+        router.setSwapSlippageBps(100);
+
+        vm.startPrank(OWNER);
+        usdc.transfer(address(leg), USD_1000);
+        leg.allocateTo(USD_1000);
+        vm.stopPrank();
+        // 100 bps drift on a $1000 USDC fill at $2/HYPE should
+        // shave ~0.5 HYPE off the fill: 500 * (10000 / 10100).
+        // Cast to uint256 up front so Solidity doesn't treat the
+        // 500 * 1e18 * 10_000 chain as a literal-overflow error.
+        uint256 one18 = 1_000_000_000_000_000_000;
+        uint256 expectedBalance =
+            (uint256(500) * one18 * 10_000) / 10_100;
+        assertEq(leg.khypeBalance(), expectedBalance,
+                 "fill accepted despite 100 bps drift (guard disabled)");
+    }
+}
+
+/// (b) setSlippageBps is owner-gated and rejects values > 100%.
+contract KI5SlippageGovernanceTests is KI5Base {
+    function test_setSlippageBps_onlyOwner_KHYPE() public {
+        KHYPELeg leg = _deployKHYPE(0);
+        vm.prank(KI5_ALICE);
+        vm.expectRevert(bytes("not owner"));
+        leg.setSlippageBps(100);
+        // And the owner path works.
+        vm.prank(KI5_OWNER);
+        leg.setSlippageBps(100);
+        assertEq(leg.slippageBps(), 100);
+    }
+
+    function test_setSlippageBps_onlyOwner_Spot() public {
+        SpotStakingLeg leg = _deploySpot(0);
+        vm.prank(KI5_ALICE);
+        vm.expectRevert(bytes("not owner"));
+        leg.setSlippageBps(100);
+        vm.prank(KI5_OWNER);
+        leg.setSlippageBps(100);
+        assertEq(leg.slippageBps(), 100);
+    }
+
+    /// Guards against a pathological `slippageBps > 100%` which would
+    /// make `(10000 - slippageBps)` underflow. Catches the bug at
+    /// deploy AND at set-time.
+    function test_setSlippageBps_rejectsOverBPS_KHYPE() public {
+        KHYPELeg leg = _deployKHYPE(0);
+        vm.prank(KI5_OWNER);
+        vm.expectRevert(bytes("slippageBps > 100%"));
+        leg.setSlippageBps(10_001);
+    }
+
+    function test_setSlippageBps_rejectsOverBPS_Spot() public {
+        SpotStakingLeg leg = _deploySpot(0);
+        vm.prank(KI5_OWNER);
+        vm.expectRevert(bytes("slippageBps > 100%"));
+        leg.setSlippageBps(10_001);
+    }
+
+    function test_constructor_rejectsOverBPS_KHYPE() public {
+        vm.prank(KI5_OWNER);
+        vm.expectRevert(bytes("slippageBps > 100%"));
+        new KHYPELeg(address(usdc), address(hype), address(router),
+                     address(pool), address(oracle), 1000, 10_001);
+    }
+
+    function test_constructor_rejectsOverBPS_Spot() public {
+        vm.prank(KI5_OWNER);
+        vm.expectRevert(bytes("slippageBps > 100%"));
+        new SpotStakingLeg(address(usdc), address(hype), address(router),
+                           address(pool), address(oracle), 1000, 10_001);
     }
 }
 
