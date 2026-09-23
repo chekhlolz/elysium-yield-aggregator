@@ -133,7 +133,6 @@ contract KHYPELeg is IYieldLeg {
         // currentValue() then collapses to `khypeBalance * price`.
         uint256 price = _hypePriceUsdc();
         require(price > 0, "no oracle price");
-        uint256 hypeEquivalent = (usdAmount * 1_000_000_000_000_000_000) / price;
 
         uint256 hypeIn = router.swapExactUSDCForToken(address(hype), usdAmount);
         require(hypeIn > 0, "router returned 0");
@@ -141,7 +140,7 @@ contract KHYPELeg is IYieldLeg {
         hype.safeApprove(address(pool), hypeIn);
         pool.stake(address(hype), hypeIn);
 
-        khypeBalance += hypeEquivalent;
+        khypeBalance += hypeIn;
         allocatedUsd += usdAmount;
 
         _recordApy(expectedApy());
@@ -172,7 +171,9 @@ contract KHYPELeg is IYieldLeg {
         require(khypeBalance > 0, "bad amount");
         uint256 price = _hypePriceUsdc();
         require(price > 0, "no oracle price");
-        uint256 hypeAmount = (usdAmount * 1_000_000_000_000_000_000) / price;
+        // usdAmount is 6-dec, price is 6-dec, HYPE is 18-dec:
+        //   hypeAmount = (usdAmount * 1e12) / price
+        uint256 hypeAmount = (usdAmount * 1_000_000_000_000) / price;
         require(khypeBalance >= hypeAmount, "bad amount");
 
         khypeBalance -= hypeAmount;

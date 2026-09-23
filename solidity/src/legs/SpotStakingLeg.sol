@@ -132,7 +132,6 @@ contract SpotStakingLeg is IYieldLeg {
         // price, and track the HYPE-equivalent for the on-book balance.
         uint256 price = _hypePriceUsdc();
         require(price > 0, "no oracle price");
-        uint256 hypeEquivalent = (usdAmount * 1_000_000_000_000_000_000) / price;
 
         uint256 hypeIn = router.swapExactUSDCForToken(address(hype), usdAmount);
         require(hypeIn > 0, "router returned 0");
@@ -140,7 +139,7 @@ contract SpotStakingLeg is IYieldLeg {
         hype.safeApprove(address(pool), hypeIn);
         _stake(hypeIn);
 
-        rewardHypeBalance += hypeEquivalent;
+        rewardHypeBalance += hypeIn;
         allocatedUsd += usdAmount;
         _recordApy(expectedApy());
         emit Allocated(usdAmount, allocatedUsd);
@@ -170,7 +169,9 @@ contract SpotStakingLeg is IYieldLeg {
         require(rewardHypeBalance > 0, "bad amount");
         uint256 price = _hypePriceUsdc();
         require(price > 0, "no oracle price");
-        uint256 hypeAmount = (usdAmount * 1_000_000_000_000_000_000) / price;
+        // usdAmount is 6-dec, price is 6-dec, HYPE is 18-dec:
+        //   hypeAmount = (usdAmount * 1e12) / price
+        uint256 hypeAmount = (usdAmount * 1_000_000_000_000) / price;
         require(rewardHypeBalance >= hypeAmount, "bad amount");
 
         rewardHypeBalance -= hypeAmount;
