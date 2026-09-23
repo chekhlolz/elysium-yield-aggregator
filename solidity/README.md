@@ -61,8 +61,8 @@ contract                  abi  deployed B  creation B
 YieldAggregator            46       10979       12151
 TradeOnlyAgent              8        2811        2839
 RegimeDetector             13        2650        2926
-KHYPELeg                   26        6615        7199
-SpotStakingLeg             27        6624        7208
+KHYPELeg                   26        6918        7495
+SpotStakingLeg             27        6926        7503
 PerpFundingLeg             32        7140        7775
 BasisHedgeLeg              33        6988        7576
 SafeERC20                   0          85         135  (library)
@@ -157,8 +157,8 @@ mock-friendly dependency interface. See `docs/ROADMAP.md §5` for the
 | YieldAggregator | 12 151 | 10 979 | Vault + keeper + timelock |
 | TradeOnlyAgent | 2 839 | 2 811 | EIP-712 delegation |
 | RegimeDetector | 2 926 | 2 650 | Market-data adapter |
-| KHYPELeg | 7 199 | 6 615 | kHYPE LST leg |
-| SpotStakingLeg | 7 208 | 6 624 | Spot-staking leg |
+| KHYPELeg | 7 495 | 6 918 | kHYPE LST leg |
+| SpotStakingLeg | 7 503 | 6 926 | Spot-staking leg |
 | PerpFundingLeg | 7 775 | 7 140 | Perp-funding leg |
 | BasisHedgeLeg | 7 576 | 6 988 | Basis-hedge leg |
 
