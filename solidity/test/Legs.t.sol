@@ -6,6 +6,10 @@ import "../src/legs/KHYPELeg.sol";
 import "../src/legs/SpotStakingLeg.sol";
 import "../src/legs/PerpFundingLeg.sol";
 import "../src/legs/BasisHedgeLeg.sol";
+import "../src/interfaces/IERC20.sol";
+import "../src/interfaces/IERC20Router.sol";
+import "../src/interfaces/IStakingPool.sol";
+import "../src/interfaces/IPriceOracle.sol";
 
 /// Round-4 leg tests: cover the KI-3 (BasisHedgeLeg.allocateTo dust
 /// guard) and KI-4 (setFixedApyBps refreshes latestApyBps) fixes.
@@ -152,17 +156,6 @@ contract LegsTest is Test {
         leg.allocateTo(100);
     }
 
-    // ---- Regression: nonReentrant guard on all 4 legs ----
-    //
-    // The NonReentrant guard's reset-between-calls behaviour is already
-    // covered by YieldAggregator.t.sol (test_deposit_reentrantGuardResets-
-    // BetweenCalls, test_executePending_reentrantGuardResetsBetweenCalls),
-    // which exercises the modifier through a real call path. Leg-level
-    // reentrancy is harder to test in isolation because harvest() on
-    // each leg touches external pools / writer / router that aren't
-    // set up in this test contract — the calls would revert on the
-    // mock addresses, not on the guard itself.
-
     // ---- Regression: name() returns the expected leg identifier ----
 
     function test_name_KHYPE() public {
@@ -184,4 +177,110 @@ contract LegsTest is Test {
         BasisHedgeLeg leg = _deployBasis();
         assertEq(leg.name(), "BasisHedgeLeg");
     }
+
+    // ---- Gap doc §2.4: reduceFrom guards on all 4 legs ----
+    //
+    // Each leg's reduceFrom must revert (not silently accept) when
+    // called with no underlying allocation. The aggregator calls
+    // reduceFrom inside executePending during rebalances; if a leg
+    // ever gets into a state where its internal position is zero but
+    // it claims a positive allocation, the guard must trip rather
+    // than silently minting USDC out of nowhere. The revert message
+    // is leg-specific but the property being pinned — "guard fires
+    // when there's no position to reduce" — is uniform.
+
+    function test_reduceFrom_KHYPE_zeroAllocationReverts() public {
+        KHYPELeg leg = _deployKHYPE();
+        vm.prank(OWNER);
+        vm.expectRevert(bytes("bad amount"));
+        leg.reduceFrom(1);
+    }
+
+    function test_reduceFrom_Spot_zeroAllocationReverts() public {
+        SpotStakingLeg leg = _deploySpot();
+        vm.prank(OWNER);
+        vm.expectRevert(bytes("bad amount"));
+        leg.reduceFrom(1);
+    }
+
+    function test_reduceFrom_Perp_zeroAllocationReverts() public {
+        PerpFundingLeg leg = _deployPerp();
+        vm.prank(OWNER);
+        vm.expectRevert(bytes("overreduce"));
+        leg.reduceFrom(1);
+    }
+
+    function test_reduceFrom_Basis_zeroAllocationReverts() public {
+        BasisHedgeLeg leg = _deployBasis();
+        vm.prank(OWNER);
+        vm.expectRevert(bytes("overreduce"));
+        leg.reduceFrom(1);
+    }
+
+    // ---- Gap doc §2.4: reduceFrom requires owner on all 4 legs ----
+
+    function test_reduceFrom_requiresOwner_KHYPE() public {
+        KHYPELeg leg = _deployKHYPE();
+        vm.prank(ALICE);
+        vm.expectRevert(bytes("not owner"));
+        leg.reduceFrom(100);
+    }
+
+    function test_reduceFrom_requiresOwner_Spot() public {
+        SpotStakingLeg leg = _deploySpot();
+        vm.prank(ALICE);
+        vm.expectRevert(bytes("not owner"));
+        leg.reduceFrom(100);
+    }
+
+    function test_reduceFrom_requiresOwner_Perp() public {
+        PerpFundingLeg leg = _deployPerp();
+        vm.prank(ALICE);
+        vm.expectRevert(bytes("not owner"));
+        leg.reduceFrom(100);
+    }
+
+    function test_reduceFrom_requiresOwner_Basis() public {
+        BasisHedgeLeg leg = _deployBasis();
+        vm.prank(ALICE);
+        vm.expectRevert(bytes("not owner"));
+        leg.reduceFrom(100);
+    }
+
+    // ---- Gap doc §2.4: reduceFrom zero-amount revert ----
+
+    function test_reduceFrom_KHYPE_zeroAmountReverts() public {
+        KHYPELeg leg = _deployKHYPE();
+        vm.prank(OWNER);
+        vm.expectRevert(bytes("bad amount"));
+        leg.reduceFrom(0);
+    }
+
+    function test_reduceFrom_Spot_zeroAmountReverts() public {
+        SpotStakingLeg leg = _deploySpot();
+        vm.prank(OWNER);
+        vm.expectRevert(bytes("bad amount"));
+        leg.reduceFrom(0);
+    }
+
+    function test_reduceFrom_Perp_zeroAmountReverts() public {
+        PerpFundingLeg leg = _deployPerp();
+        vm.prank(OWNER);
+        vm.expectRevert(bytes("zero"));
+        leg.reduceFrom(0);
+    }
+
+    function test_reduceFrom_Basis_zeroAmountReverts() public {
+        BasisHedgeLeg leg = _deployBasis();
+        vm.prank(OWNER);
+        vm.expectRevert(bytes("zero"));
+        leg.reduceFrom(0);
+    }
 }
+
+// ==================================================================
+// KI-1 (DESIGN_KI1_UNIT_RECONCILE.md, Option A -- convert once at
+// the boundary). Both stake legs must reconcile USDC <-> HYPE
+// explicitly on every mutation; khypeBalance is tracked in HYPE
+// units (18 dec), and pool.unstake must receive a stake-token
+// amount derived via the live pool.exchangeRate(), never a raw

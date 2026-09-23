@@ -61,7 +61,7 @@ contract MockLeg is IYieldLeg {
     }
     function harvest() external { harvestCount += 1; }
 
-    function reduceFrom(uint256 amount) external returns (uint256) {
+    function reduceFrom(uint256 amount) external virtual returns (uint256) {
         require(msg.sender == aggregator, "agg only");
         if (amount > totalAllocated) {
             totalAllocated = 0;
@@ -87,6 +87,41 @@ contract MockLeg is IYieldLeg {
     function setUsdc(address t) external { _usdc = t; aggregator = msg.sender; }
     function usdcToken() external view returns (address) { return _usdc; }
     function _usdcToken() internal view returns (address) { return _usdc; }
+}
+
+/// Mock leg whose `reduceFrom` always reverts. Used to pin the failure
+/// path in `YieldAggregator.executePending`: when a leg refuses to
+/// reduce, the entire executePending call reverts. Because Solidity
+/// rolls back the whole transaction, `pendingAllocationId` and `_weights`
+/// both revert to their pre-call state — the keeper is not stuck with
+/// a zeroed pending id and old weights.
+contract RevertingLeg is MockLeg {
+    function reduceFrom(uint256 amount) external override returns (uint256) {
+        revert("leg refuses to reduce");
+    }
+}
+
+/// Mock leg whose `reduceFrom` returns only half of the requested
+/// amount and sweeps only the returned portion. Used to pin the KI-5
+/// fix: `YieldAggregator.executePending` must book the ACTUAL returned
+/// amount from `reduceFrom` into `_allocatedTotal`, not the requested
+/// `delta`. A pre-fix aggregator that booked the requested delta would
+/// understate `_allocatedTotal` by `delta/2`, drifting the share
+/// conversion rate.
+contract UnderReturnLeg is MockLeg {
+    function reduceFrom(uint256 amount) external override returns (uint256) {
+        require(msg.sender == aggregator, "agg only");
+        uint256 returned = amount / 2;
+        if (returned > 0 && totalAllocated >= returned) {
+            totalAllocated -= returned;
+        }
+        // Sweep only the returned USDC out of this leg.
+        IERC20Minimal usdcTok = IERC20Minimal(_usdcToken());
+        if (returned > 0) {
+            usdcTok.transfer(aggregator, returned);
+        }
+        return returned;
+    }
 }
 
 contract YieldAggregatorTest is Test {
@@ -389,6 +424,164 @@ contract YieldAggregatorTest is Test {
         vm.prank(OWNER);
         vm.expectRevert("wrong id");
         agg.cancelPending(bytes32(uint256(1)));
+    }
+
+    // ---- executePending failure paths (gap-doc §3) ----
+    //
+    // The aggregator's rebalance loop calls legs[i].reduceFrom(delta)
+    // for every leg where the target allocation shrank. If any of
+    // those calls reverts, the whole executePending transaction
+    // reverts — so `pendingAllocationId` and `_weights` both roll
+    // back to their pre-call state. The keeper is not stuck with a
+    // zeroed pending id and old weights; it can simply retry with a
+    // new request (or cancelPending before the timelock elapses).
+    //
+    // The KI-5 fix (round-4) makes the aggregator book the ACTUAL
+    // returned amount from reduceFrom, not the requested delta. The
+    // UnderReturnLeg test below pins this: a leg that returns only
+    // half of what was asked must not have the full requested delta
+    // subtracted from `_allocatedTotal`, or totalAssets() would
+    // drift downward by half the shortfall.
+
+    function _deployAggWithRevertingLeg() internal returns (YieldAggregator newAgg) {
+        MockUSDC usdcTok = new MockUSDC();
+        MockLeg[4] memory newLegs = [
+            new MockLeg(),
+            new RevertingLeg(),
+            new MockLeg(),
+            new MockLeg()
+        ];
+        uint16[4] memory init = [uint16(2500), uint16(2500), uint16(2500), uint16(2500)];
+        IYieldLeg[4] memory legI = [
+            IYieldLeg(newLegs[0]), IYieldLeg(newLegs[1]),
+            IYieldLeg(newLegs[2]), IYieldLeg(newLegs[3])
+        ];
+        newAgg = new YieldAggregator(usdcTok, KEEPER, legI, 1 hours, init);
+
+        vm.startPrank(address(newAgg));
+        newLegs[0].setUsdc(address(usdcTok));
+        newLegs[1].setUsdc(address(usdcTok));
+        newLegs[2].setUsdc(address(usdcTok));
+        newLegs[3].setUsdc(address(usdcTok));
+        vm.stopPrank();
+    }
+
+    function test_executePending_legRevertsOnReduceFailsAtomic() public {
+        YieldAggregator newAgg = _deployAggWithRevertingLeg();
+        MockUSDC usdcTok = MockUSDC(newAgg.asset());
+
+        // Deposit so the vault has cash to distribute.
+        usdcTok.mint(ALICE, 1_000_000 ether);
+        vm.prank(ALICE);
+        usdcTok.approve(address(newAgg), type(uint256).max);
+        vm.prank(ALICE);
+        newAgg.deposit(1000 ether, ALICE);
+
+        uint16[4] memory oldW = newAgg.weights();
+
+        // Request a rebalance that shrinks leg 1 (the RevertingLeg)
+        // so executePending calls its reduceFrom.
+        uint16[4] memory w = [
+            uint16(2500), uint16(500), uint16(4000), uint16(3000)
+        ];
+        vm.prank(KEEPER);
+        bytes32 pendingId = newAgg.requestAllocation(w, "reduce reverting leg");
+
+        vm.warp(block.timestamp + 1 hours + 1);
+
+        // executePending must revert with the RevertingLeg's message.
+        vm.expectRevert("leg refuses to reduce");
+        newAgg.executePending();
+
+        // Atomicity: weights and pendingAllocationId both rolled
+        // back to their pre-call state.
+        uint16[4] memory gotW = newAgg.weights();
+        assertEq(gotW[0], oldW[0], "weights[0] should be unchanged");
+        assertEq(gotW[1], oldW[1], "weights[1] should be unchanged");
+        assertEq(gotW[2], oldW[2], "weights[2] should be unchanged");
+        assertEq(gotW[3], oldW[3], "weights[3] should be unchanged");
+        assertEq(newAgg.pendingAllocationId(), pendingId, "pendingAllocationId should be unchanged");
+        assertEq(newAgg.totalAssets(), 1000 ether, "totalAssets should be unchanged");
+    }
+
+    function test_executePending_underReturningLegBooksActualReturn() public {
+        MockUSDC usdcTok = new MockUSDC();
+        MockLeg leg0 = new MockLeg();
+        MockLeg leg1 = new MockLeg();
+        UnderReturnLeg underLeg = new UnderReturnLeg();
+        MockLeg leg3 = new MockLeg();
+        MockLeg[4] memory newLegs = [leg0, leg1, MockLeg(underLeg), leg3];
+        uint16[4] memory init = [uint16(2500), uint16(2500), uint16(2500), uint16(2500)];
+        IYieldLeg[4] memory legI = [
+            IYieldLeg(leg0), IYieldLeg(leg1),
+            IYieldLeg(underLeg), IYieldLeg(leg3)
+        ];
+        YieldAggregator newAgg = new YieldAggregator(usdcTok, KEEPER, legI, 1 hours, init);
+
+        vm.startPrank(address(newAgg));
+        leg0.setUsdc(address(usdcTok));
+        leg1.setUsdc(address(usdcTok));
+        underLeg.setUsdc(address(usdcTok));
+        leg3.setUsdc(address(usdcTok));
+        vm.stopPrank();
+
+        usdcTok.mint(ALICE, 1_000_000 ether);
+        vm.prank(ALICE);
+        usdcTok.approve(address(newAgg), type(uint256).max);
+        vm.prank(ALICE);
+        newAgg.deposit(20000 ether, ALICE);
+
+        // Each leg now holds 2500 bps of 20000 = 5000 USDC.
+        // Mint extra cash to the aggregator so executePending has
+        // enough to fund the growing legs.
+        usdcTok.mint(address(newAgg), 20_000 ether);
+
+        // Rebalance: shrink leg 2 from 2500 bps to 1500 bps.
+        // Per-leg targets before exec (2500 bps of 40000) = 10000.
+        // Per-leg targets after  exec (30/30/15/25 bps of 40000)
+        //   = 12000 / 12000 / 6000 / 10000.
+        // Deltas:  leg0 +2000, leg1 +2000, leg2 -4000, leg3  0.
+        // UnderReturnLeg's reduceFrom returns 4000/2 = 2000, not 4000.
+        uint16[4] memory w = [
+            uint16(3000), uint16(3000), uint16(1500), uint16(2500)
+        ];
+        vm.prank(KEEPER);
+        newAgg.requestAllocation(w, "under-return leg");
+        vm.warp(block.timestamp + 1 hours + 1);
+
+        // Total assets must not change despite the leg under-return:
+        // the 2000 USDC shortfall ends up in the vault as free cash,
+        // which is still part of `totalAssets()` (leg value + vault cash).
+        uint256 taBefore = newAgg.totalAssets();
+        assertEq(taBefore, 40000 ether, "pre-exec totalAssets");
+
+        newAgg.executePending();
+
+        // UnderReturnLeg's internal book:
+        //   before: 5000   (2500 bps of 20000, from the deposit)
+        //   after:  3000   (the leg debited only the ACTUAL returned
+        //                   2000, not the full requested delta 4000)
+        // A pre-KI-5 aggregator bug would still leave the leg's book
+        // at 3000 — the bug is on the VAULT side (`_allocatedTotal`
+        // would be 2000 too low). The vault-side bug is pinned by
+        // the totalAssets invariant + vault-cash invariant below.
+        assertEq(underLeg.totalAllocated(), 3000 ether,
+            "leg's book must reflect actual return, not requested delta");
+
+        // totalAssets must be preserved — the 2000 shortfall ends up
+        // as free vault cash, which is still counted in totalAssets.
+        assertEq(newAgg.totalAssets(), taBefore,
+            "totalAssets must be preserved despite leg under-return");
+
+        // Vault-cash invariant: UnderReturnLeg sweeps ONLY `returned`
+        // (2000), so the vault ends with 18000 USDC of free cash,
+        // not 20000 (which would be the case if the leg had returned
+        // the full requested 4000).
+        assertEq(
+            usdcTok.balanceOf(address(newAgg)),
+            18_000 ether,
+            "vault cash must reflect actual return (2000), not requested delta (4000)"
+        );
     }
 
     function test_executePending_revertsBeforeTimelock() public {
