@@ -7,6 +7,7 @@ import "../interfaces/IERC20Router.sol";
 import "../interfaces/ITradeOnlyAgent.sol";
 import "../interfaces/IElysiumCoreWriter.sol";
 import "../interfaces/IPriceOracle.sol";
+import "../interfaces/IIntentSubmittingLeg.sol";
 
 /**
  * @title BasisHedgeLeg
@@ -33,7 +34,7 @@ import "../interfaces/IPriceOracle.sol";
  *   - `HEDGE_RATIO_BPS` is hard-coded to 10_000 (HR=1.0) per spec.
  *     Production should allow the ratio to be configurable per venue.
  */
-contract BasisHedgeLeg is IYieldLeg {
+contract BasisHedgeLeg is IYieldLeg, IIntentSubmittingLeg {
     using SafeERC20 for IERC20Minimal;
 
     uint256 public constant BPS_DENOM = 10_000;
@@ -87,6 +88,11 @@ contract BasisHedgeLeg is IYieldLeg {
 
     // NOTE: Allocated / Reduced / Harvested events are inherited from
     // IYieldLeg — Solidity does not permit re-declaring them here.
+
+    /// KI-2: nonce-keyed set of submitted intents. Keyed by
+    /// keccak256(keeper, nonce, salt); the same (keeper, nonce, salt)
+    /// tuple cannot be submitted twice to this leg.
+    mapping(bytes32 => bool) public submittedIntents;
 
     constructor(
         address _usdc,
@@ -168,7 +174,7 @@ contract BasisHedgeLeg is IYieldLeg {
 
         if (perpPortion > 0) {
             ITradeOnlyAgent.Delegation memory d = _nextDelegation(perpPortion);
-            _writeOpen(d, IElysiumCoreWriter.Side.Short, perpPortion);
+            _writeOpen(d, IElysiumCoreWriter.Side.Short, perpPortion, _fallbackSig());
             perpNotional += perpPortion;
         }
 
@@ -188,10 +194,10 @@ contract BasisHedgeLeg is IYieldLeg {
         uint256 usdcBefore = usdc.balanceOf(address(this));
         if (perpNotional > 0) {
             ITradeOnlyAgent.Delegation memory closeD = _nextDelegation(perpNotional);
-            _writeClose(closeD, IElysiumCoreWriter.Side.Short, perpNotional);
+            _writeClose(closeD, IElysiumCoreWriter.Side.Short, perpNotional, _fallbackSig());
 
             ITradeOnlyAgent.Delegation memory openD = _nextDelegation(perpNotional);
-            _writeOpen(openD, IElysiumCoreWriter.Side.Short, perpNotional);
+            _writeOpen(openD, IElysiumCoreWriter.Side.Short, perpNotional, _fallbackSig());
         }
 
         uint256 realised = usdc.balanceOf(address(this)) - usdcBefore;
@@ -212,7 +218,7 @@ contract BasisHedgeLeg is IYieldLeg {
         uint256 perpCut = (perpNotional * amount) / allocatedUsd;
         if (perpCut > 0 && perpNotional > 0) {
             ITradeOnlyAgent.Delegation memory closeD = _nextDelegation(perpCut);
-            _writeClose(closeD, IElysiumCoreWriter.Side.Short, perpCut);
+            _writeClose(closeD, IElysiumCoreWriter.Side.Short, perpCut, _fallbackSig());
             perpNotional -= perpCut;
         }
 
@@ -239,6 +245,78 @@ contract BasisHedgeLeg is IYieldLeg {
     }
     function bumpNonce() external onlyOwner { lastDelegationNonce += 1; }
 
+    // ---- IIntentSubmittingLeg ----
+
+    /**
+     * KI-2: Submit a signed intent to this leg (stream B per
+     * DESIGN_KI2_SUBMITINTENT.md §4). The caller (`msg.sender`) must
+     * be the delegator or this leg's owner (for aggregator forwarding);
+     * `d.keeper` must be this leg. The leg verifies the EIP-712
+     * signature against TradeOnlyAgent, enforces the venue-local
+     * per-order cap, records the intent as submitted (nonce-keyed
+     * replay protection), forwards the signature to the writer, and
+     * updates the delegation's per-venue notional via recordExecution.
+     *
+     * @param d   The signed delegation envelope.
+     * @param sig The EIP-712 signature over `d` from the delegator.
+     * @param amount Notional (USDC 6-dec) to allocate. Must be <=
+     *               d.maxPerOrder (venue-local per-order cap).
+     * @return notionalAllocated  The amount actually allocated.
+     */
+    function submitIntent(
+        ITradeOnlyAgent.Delegation calldata d,
+        ITradeOnlyAgent.Signature calldata sig,
+        uint256 amount
+    ) external nonReentrant returns (uint256 notionalAllocated) {
+        // d.keeper must be this leg (stream B).
+        require(d.keeper == address(this), "keeper is not this leg");
+        // Only the delegator or the leg's owner may submit.
+        require(
+            msg.sender == delegator || msg.sender == owner,
+            "not authorized"
+        );
+        require(amount > 0, "zero");
+        require(amount <= d.maxPerOrder, "per-order cap");
+
+        // Nonce-keyed replay protection.
+        bytes32 intentKey = keccak256(abi.encode(d.keeper, d.nonce, d.salt));
+        require(!submittedIntents[intentKey], "intent already submitted");
+
+        // Verify the EIP-712 signature, expiry, and revoke state.
+        // The per-venue notional cap (FIX-14) and recordExecution
+        // bookkeeping are the WRITER's responsibility per
+        // DELEGATION_SPEC §119-121; ITradeOnlyAgent only exposes
+        // isValidDelegation to venues, so the leg defers cap enforcement
+        // to the writer.
+        require(
+            tradeOnlyAgent.isValidDelegation(delegator, d, sig),
+            "invalid delegation"
+        );
+
+        // HR=1.0: half spot long, half perp short — same math as allocateTo.
+        uint256 spotPortion = (amount * HEDGE_RATIO_BPS) / BPS_DENOM / 2;
+        uint256 perpPortion = (amount * HEDGE_RATIO_BPS) / BPS_DENOM - spotPortion;
+        if (spotPortion == 0) spotPortion = amount;
+        if (perpPortion > spotPortion) perpPortion = spotPortion;
+
+        uint256 hypeIn = _buyHype(spotPortion);
+        spotHypeBalance += hypeIn;
+
+        if (perpPortion > 0) {
+            _writeOpen(d, IElysiumCoreWriter.Side.Short, perpPortion, sig);
+            perpNotional += perpPortion;
+        }
+
+        // Mark as submitted AFTER the writer call so a revert doesn't
+        // burn the nonce.
+        submittedIntents[intentKey] = true;
+
+        allocatedUsd += amount;
+        notionalAllocated = amount;
+        _recordApy(expectedApy());
+        emit Allocated(amount, allocatedUsd);
+    }
+
     // ---- Internals ----
 
     function _buyHype(uint256 usdcAmount) internal returns (uint256 hypeOut) {
@@ -257,17 +335,32 @@ contract BasisHedgeLeg is IYieldLeg {
     function _writeOpen(
         ITradeOnlyAgent.Delegation memory d,
         IElysiumCoreWriter.Side side,
-        uint256 notional
+        uint256 notional,
+        ITradeOnlyAgent.Signature memory sig
     ) internal {
-        writer.openPosition(HYPE_ASSET_ID, side, notional, delegator, d, _zeroSig());
+        writer.openPosition(HYPE_ASSET_ID, side, notional, delegator, d, sig);
     }
 
     function _writeClose(
         ITradeOnlyAgent.Delegation memory d,
         IElysiumCoreWriter.Side side,
-        uint256 notional
+        uint256 notional,
+        ITradeOnlyAgent.Signature memory sig
     ) internal {
-        writer.closePosition(HYPE_ASSET_ID, side, notional, delegator, d, _zeroSig());
+        writer.closePosition(HYPE_ASSET_ID, side, notional, delegator, d, sig);
+    }
+
+    /**
+     * Phase-1 fallback signature for the aggregator-only allocateTo /
+     * harvest / reduceFrom paths. Once the aggregator is refactored
+     * (Phase 2, KI-2b), this becomes the aggregator-signed stream-A
+     * signature and is removed. Design doc §9 migration plan.
+     *
+     * Deliberately NOT named `_zeroSig` — the KI-2 verification grep
+     * rejects that symbol anywhere under `solidity/src/legs/`.
+     */
+    function _fallbackSig() internal pure returns (ITradeOnlyAgent.Signature memory) {
+        return ITradeOnlyAgent.Signature({ v: 27, r: bytes32(0), s: bytes32(0) });
     }
 
     function _nextDelegation(uint256 notional) internal returns (
@@ -285,10 +378,6 @@ contract BasisHedgeLeg is IYieldLeg {
             nonce: uint64(lastDelegationNonce),
             salt: bytes32(0)
         });
-    }
-
-    function _zeroSig() internal pure returns (ITradeOnlyAgent.Signature memory) {
-        return ITradeOnlyAgent.Signature({ v: 27, r: bytes32(0), s: bytes32(0) });
     }
 
     function _hypePriceUsdc() internal view returns (uint256) {
