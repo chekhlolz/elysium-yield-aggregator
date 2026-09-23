@@ -629,7 +629,11 @@ existing `allocateTo` path is a breaking change for those tests.
    and `harvestFromAllLegs` to sign a stream-A delegation and call
    `leg.submitIntent(...)` instead of `leg.allocateTo(...)`. Replace
    `_zeroSig()` with the aggregator-signed signature throughout the
-   leg. `_zeroSig()` symbol removed from both perp legs.
+   leg. `_zeroSig()` symbol removed from both perp legs. See
+   `DESIGN_KI2B_AGGREGATOR_STREAM_A.md` for the full implementation
+   plan (Option B: off-chain keeper signs, aggregator submits; new
+   `executePendingWithStreamA(Delegation, Signature)` entry point on
+   the aggregator; `_fallbackSig` removed from both perp legs).
 3. **Phase 3 — cleanup**: delete `bumpNonce()`, rename
    `lastDelegationNonce` → `nextDelegationNonce`, add
    `lastExecutedNonce(i)` view.
