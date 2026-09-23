@@ -118,7 +118,9 @@ contract SpotStakingLeg is IYieldLeg {
         uint256 v = 0;
         if (rewardHypeBalance > 0) {
             uint256 price = _hypePriceUsdc();
-            v = (rewardHypeBalance * price) / 1_000_000;
+            // khypeBalance is 18-dec HYPE, price is 6-dec USDC/HYPE.
+            // value_6dec = khypeBalance * price / 1e18 (cancel 18-dec HYPE).
+            v = (rewardHypeBalance * price) / 1_000_000_000_000_000_000;
         }
         v += usdc.balanceOf(address(this));
         return v;
@@ -171,7 +173,9 @@ contract SpotStakingLeg is IYieldLeg {
         require(price > 0, "no oracle price");
         // usdAmount is 6-dec, price is 6-dec, HYPE is 18-dec:
         //   hypeAmount = (usdAmount * 1e12) / price
-        uint256 hypeAmount = (usdAmount * 1_000_000_000_000) / price;
+        // usdAmount is 6-dec, price is 6-dec, HYPE is 18-dec:
+        //   hypeAmount = (usdAmount * 1e18) / price
+        uint256 hypeAmount = (usdAmount * 1_000_000_000_000_000_000) / price;
         require(rewardHypeBalance >= hypeAmount, "bad amount");
 
         rewardHypeBalance -= hypeAmount;
