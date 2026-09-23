@@ -120,10 +120,9 @@ NOT mainnet-ready.
 ### 2.4 Testing
 
 - **Foundry tests** — forge installed 2026-09-22 (v1.8.3, in
-  `~/.foundry/bin/`). Round-6 suite in place (107 tests total, +25
-  since round-5 covering KI-1 regressions, KI-7/KI-8 delegate paths,
-  `observe()` lifecycle, `executePending` failure paths, and
-  `reduceFrom` guards):
+  `~/.foundry/bin/`). Round-7 suite in place (120 tests total, +13
+  since round-6 covering KI-2 `submitIntent` regressions, staking-leg
+  negative tests, and 3 aggregator invariants):
   - `solidity/test/RegimeDetector.t.sol` — 20 tests (constructor,
     setThresholds owner-gating, priority chain, fuzz invariant, weight
     sums, `observe()` lifecycle: populates snapshot, emits on change,
@@ -137,17 +136,41 @@ NOT mainnet-ready.
   - `solidity/test/TradeOnlyAgent.t.sol` — 19 tests (EIP-712 signature
     recovery, expiresAt == 0 never-expires sentinel, per-venue
     notional cap, revoke, tampered/wrong-signer rejection).
-  - `solidity/test/Legs.t.sol` — 27 tests (KI-4 setFixedApyBps
-    refreshes expectedApy on all 4 legs, KI-3 BasisHedgeLeg dust
-    guard, allocateTo owner gate on all 4 legs, name() regression,
-    `reduceFrom` guards × 4 legs × 3 guard types).
-  - **New: `KI1Reconcile` (7 tests)** — inside `Legs.t.sol`
-    (`test_KI1_*_KHYPELeg_*` and `test_KI1_*_SpotStakingLeg_*`):
-    convert-once-at-boundary accounting, oracle re-pricing rerates
-    `currentValue`, `reduce` returns USDC (not HYPE), `allocate`
-    at fixed price. Regression for KI-1.
-  - Total: **107 tests, 0 failed** (20 + 34 + 19 + 27 + 7). Run with
-    `forge test`.
+  - `solidity/test/Legs.t.sol` — 46 tests across 4 contract suites:
+    - **LegsTest** (27): KI-4 setFixedApyBps refreshes expectedApy on
+      all 4 legs, KI-3 BasisHedgeLeg dust guard, allocateTo owner
+      gate on all 4 legs, name() regression, `reduceFrom` guards
+      × 4 legs × 3 guard types.
+    - **KI1ReconcileTest** (7): convert-once-at-boundary accounting,
+      oracle re-pricing rerates `currentValue`, `reduce` returns
+      USDC (not HYPE), `allocate` at fixed price; regression for
+      KI-1.
+    - **KI2PerpFundingTests** (6): `submitIntent` forwards real sig,
+      invalid-sig reverts, over-cap reverts, replay reverts,
+      wrong-keeper reverts, unauthorized-caller reverts.
+    - **KI2BasisHedgeTests** (4): same coverage, minus the
+      unauthorized-caller case (basis's owner-gate is identical to
+      perp's).
+    - **KI2StakingLegsNegativeTest** (2): KHYPELeg and
+      SpotStakingLeg do NOT expose the `submitIntent` selector
+      (staking legs never call the writer per design doc §4).
+  - `solidity/test/YieldAggregator.invariant.t.sol` — 1 invariant
+    campaign (3 invariants inside, per `docs/TEST_COVERAGE_GAP.md`
+    §4):
+    1. `invariant_shareValueBounded` — each shareholder's pro-rata
+       slice of `totalAssets()` is bounded by `totalAssets()`.
+    2. `invariant_weightsSumTo10000` — weights always sum to
+       `BPS_DENOM`.
+    3. `invariant_noDoubleCounting` — `_allocatedTotal + vaultCash <=
+       totalAssets()` (KI-5 accounting), plus fully-observable
+       `totalLegValue + vaultCash == totalAssets` sanity check.
+    Fuzzer sender is a non-owner/non-keeper to exercise the FIX-22/23
+    delegate paths. `requestAllocation` fuzz takes `(a,b,c)` and
+    derives `d = 10000 - a - b - c` via a clamp-per-slot pattern so
+    the weight-sum constraint is always satisfiable. `--fuzz-runs 128`
+    also passes (forge 1.8.3 has no `--invariant-runs` flag).
+  - Total: **120 tests, 0 failed** (20 + 34 + 19 + 27 + 7 + 6 + 4 +
+    2 + 1 invariant campaign). Run with `forge test`.
   - External verifier (`check_repo.py`) still ignores `solidity/test/`
     because it runs solc directly without forge-std remapping — that
     path is covered by `forge test`.
@@ -165,9 +188,10 @@ review of the test-coverage gaps surfaced two more real bugs —
 **KI-7** (delegate `withdraw` collateral anti-pattern) and **KI-8**
 (`redeem` share-allowance category error) — both fixed in round-5
 (commit after `7d007ee`). Round-6 closed **KI-1** (stake-leg unit
-drift, Option A: convert once at boundary). Open items for M2: KI-2
-(`_zeroSig()` writer stub — production blocker), KI-6 (per-venue
-delegation cap — accepted spec tradeoff).
+drift, Option A: convert once at boundary). Round-7 closed **KI-2**
+(`_zeroSig()` writer stub — production blocker, Option C: hybrid).
+Only remaining open item for M2: **KI-6** (per-venue delegation cap —
+accepted spec tradeoff, documented in `DELEGATION_SPEC.md §9`).
 
 - **KI-3, KI-4, KI-5** — round-4 fixes, regression tests in
   `solidity/test/Legs.t.sol` and `YieldAggregator.t.sol`.
@@ -176,13 +200,16 @@ delegation cap — accepted spec tradeoff).
   `test_redeem_delegateNoShareAllowanceGate`, `test_redeem_delegateWithNoApproval`,
   `test_redeem_delegateSucceedsAndBurnsShares`).
 - **KI-1** — round-6 fix, regression tests `test_KI1_*` × 7 in
-  `solidity/test/Legs.t.sol`.
-- **KI-2, KI-6** — open; see §2.5 table and §5.
+  `solidity/test/Legs.t.sol` (`KI1ReconcileTest` suite).
+- **KI-2** — round-7 fix, regression tests × 12 in
+  `solidity/test/Legs.t.sol` (`KI2PerpFundingTests` × 6,
+  `KI2BasisHedgeTests` × 4, `KI2StakingLegsNegativeTest` × 2).
+- **KI-6** — accepted spec tradeoff; not a bug. See §5 and `DELEGATION_SPEC.md §9`.
 
 | # | Issue | Where | Status |
 |---|---|---|---|
 | KI-1 | ~~Stake legs (`KHYPELeg`, `SpotStakingLeg`) mix unit domains: `khypeBalance` is tracked in HYPE, but `amount` and `allocatedUsd` are in USDC. `currentValue()` multiplies by price to reconcile, but `_distribute` and `reduceFrom` return USDC — leg-internal accounting may drift when the oracle re-prices HYPE.~~ | `src/legs/KHYPELeg.sol`, `src/legs/SpotStakingLeg.sol` | **FIXED in round-6**: Option A from `docs/DESIGN_KI1_UNIT_RECONCILE.md` — convert once at the boundary, track `khypeBalance` in HYPE units internally, USDC is a caller-side concept. Regression tests: `test_KI1_*` × 7 in `Legs.t.sol`. |
-| KI-2 | `writer.openPosition(...)` / `closePosition(...)` in every leg is called with `_zeroSig()` — a placeholder signature that will always fail on a real `ElysiumCoreWriter`. Production flow needs `submitIntent(Delegation, Signature, uint256)` on each leg. | All 4 legs | TODO, listed in §5; design in `docs/DESIGN_KI2_SUBMITINTENT.md` (recommended: hybrid — aggregator keeper signs stream A, perp legs accept stream-B intents). |
+| KI-2 | ~~`writer.openPosition(...)` / `closePosition(...)` in every leg is called with `_zeroSig()` — a placeholder signature that will always fail on a real `ElysiumCoreWriter`. Production flow needs `submitIntent(Delegation, Signature, uint256)` on each leg.~~ | `src/legs/PerpFundingLeg.sol`, `src/legs/BasisHedgeLeg.sol` | **FIXED in round-7**: Option C from `docs/DESIGN_KI2_SUBMITINTENT.md` — hybrid. New interface `IIntentSubmittingLeg` (separate from `IYieldLeg`); perp legs (`PerpFundingLeg`, `BasisHedgeLeg`) implement it with `submitIntent(Delegation, Signature, uint256)` that verifies via `TradeOnlyAgent.isValidDelegation`, enforces venue-local `maxPerOrder`, marks intent nonce-keyed, executes via writer with the real signature, and calls `recordExecution`. Staking legs (`KHYPELeg`, `SpotStakingLeg`) untouched — they never call the writer. `_zeroSig()` renamed to `_fallbackSig` on the perp legs (only invoked when `fundingSource` is unwired, not in the production path). Regression tests: 12 KI-2 tests in `Legs.t.sol` (valid-sig forwards real sig, invalid-sig reverts, over-cap reverts, replay reverts, wrong-keeper reverts, unauthorized-caller reverts, staking-legs negative test). |
 | KI-3 | ~~`BasisHedgeLeg.allocateTo(1)` double-allocates: with `spotPortion = 1 / 2 = 0`, the `if (spotPortion == 0) spotPortion = amount;` guard re-runs with `perpPortion = amount - spotPortion = 0`, but the code then still calls `_writeOpen` once, so 1 USDC of allocation creates both a spot and perp open with notional 0.~~ | `src/legs/BasisHedgeLeg.sol` | **FIXED in round-4**: added `require(amount >= 2, "dust")` guard in `allocateTo`. Regression test: `test_KI3_BasisHedgeLeg_allocateTo_rejectsDust`. |
 | KI-4 | ~~`setFixedApyBps(v)` on all 4 legs writes `fixedApyBps` but doesn't refresh `latestApyBps`. Until the next `harvest()` or `allocateTo()` runs, `expectedApy()` continues returning the stale `latestApyBps`.~~ | All 4 legs | **FIXED in round-4**: `setFixedApyBps` now sets `latestApyBps = v` when the oracle/fundingSource is unwired. Regression tests: `test_KI4_*Leg_setFixedApyBps_refreshesExpectedApy` (4 legs). |
 | KI-5 | ~~`_allocatedTotal` in `YieldAggregator` decrements by `delta` on `executePending`'s reduce path, but `legs[i].reduceFrom(delta)` may return less than `delta` (unstake waiting, rounding). The accounting is optimistic — vault's share balances can exceed `_allocatedTotal + freeCash` on a slow leg.~~ | `src/aggregator/YieldAggregator.sol` | **FIXED in round-4**: `executePending` and `_redeem` now use the actual `reduceFrom` return value instead of the requested `delta`/`take`. `_redeem` also breaks early if a leg returns 0 to avoid silently under-delivering. |
@@ -226,6 +253,58 @@ Round-6 (2026-09-22) closed **KI-1** and lifted the test suite from 82 →
 Net effect: **107 tests, 0 failed** (`forge test`), **KI-1 closed**,
 only **KI-2** and **KI-6** (accepted spec tradeoff) remain open for M2.
 
+### 2.7 Round-7 changelog
+
+Round-7 (2026-09-23) closed **KI-2** and lifted the test suite from
+107 → 120 tests. Commits `7f34eda` + `c0dfb67`.
+
+- **KI-2 fixed** — `_zeroSig()` writer stub replaced with a real
+  `submitIntent` flow (Option C from
+  `docs/DESIGN_KI2_SUBMITINTENT.md`):
+  - New interface `solidity/src/interfaces/IIntentSubmittingLeg.sol`
+    (separate from `IYieldLeg` per design doc §5.1).
+  - `PerpFundingLeg` and `BasisHedgeLeg` now implement
+    `submitIntent(Delegation, Signature, uint256)`: verifies the
+    signature via `TradeOnlyAgent.isValidDelegation`, enforces
+    venue-local `maxPerOrder` (per `DELEGATION_SPEC.md §107-134`),
+    marks the intent as submitted (nonce-keyed, replay-protected),
+    executes via `ElysiumCoreWriter` with the real signature, and
+    calls `TradeOnlyAgent.recordExecution` to update the cap.
+  - Staking legs (`KHYPELeg`, `SpotStakingLeg`) untouched — they
+    never call the writer (design doc §4).
+  - `_zeroSig()` renamed to `_fallbackSig` on the perp legs and is
+    only invoked when `fundingSource` is unwired (not in the
+    production path).
+  - Regression tests: 12 KI-2 tests across 3 suites in `Legs.t.sol`
+    (`KI2PerpFundingTests` × 6, `KI2BasisHedgeTests` × 4,
+    `KI2StakingLegsNegativeTest` × 2).
+- **Forge invariant tests** — new `solidity/test/YieldAggregator.invariant.t.sol`
+  with 3 invariants (per `docs/TEST_COVERAGE_GAP.md §4`):
+  1. `invariant_shareValueBounded` — each shareholder's pro-rata
+     slice of `totalAssets()` is bounded by `totalAssets()`.
+  2. `invariant_weightsSumTo10000` — weights always sum to
+     `BPS_DENOM`.
+  3. `invariant_noDoubleCounting` — `_allocatedTotal + vaultCash <=
+     totalAssets()` (KI-5 accounting), plus fully-observable
+     `totalLegValue + vaultCash == totalAssets` sanity check.
+  Fuzzer sender is a non-owner/non-keeper to exercise the FIX-22/23
+  delegate paths. `requestAllocation` fuzz takes `(a,b,c)` and
+  derives `d = 10000 - a - b - c` via a clamp-per-slot pattern so
+  the weight-sum constraint is always satisfiable.
+- **Forge 1.8.3 gotcha (invariant runner)**: the runner reports
+  `failed to set up invariant testing environment: No contracts to
+  fuzz` whenever the test contract is the only target, *even* after
+  explicit `targetContract` / `targetArtifact` / `targetSelector` /
+  `targetSender`. Fix: deploy the aggregator in `setUp()`, then call
+  `targetContract(address(this))` in `setUp()` so the runner
+  auto-discovers the test contract, plus an empty `setUpInvariant()`
+  to satisfy the runner. Also: forge 1.8.3 has no `--invariant-runs`
+  flag (only `--invariant-depth`, `--invariant-workers`, etc.);
+  `--fuzz-runs 128` is the closest equivalent.
+
+Net effect: **120 tests, 0 failed** (`forge test`), **KI-2 closed**,
+only **KI-6** (accepted spec tradeoff) remains open for M2.
+
 ## 3. Kinetiq conversation
 
 **Send this when**: the aggregator sim produces alpha >= 0 on the real
@@ -251,8 +330,8 @@ draft.
 | Milestone | Status |
 |---|---|
 | **M1: Research artifact** | ✅ Repo + specs + KINETIQ_EMAIL_DRAFT.md (draft, not sent — awaiting Kinetiq contact + GitHub push). |
-| **M2: Testnet deployment** | 🟡 4 leg contracts + aggregator ✅. Round-4 closed KI-3 (BasisHedge dust guard), KI-4 (stale `latestApyBps`), KI-5 (optimistic `_allocatedTotal`). Round-5 closed KI-7 (delegate withdraw collateral) and KI-8 (redeem share-allowance category error). Round-6 closed **KI-1** (stake-leg unit drift — Option A, convert once at boundary). **Still open**: **KI-2** (`_zeroSig()` writer stub — production blocker, design in `docs/DESIGN_KI2_SUBMITINTENT.md`), **KI-6** (per-venue delegation cap — accepted spec); see §2.5. |
-| **M3: Audit-ready** | 🟡 Foundry test suite: **107 tests PASS** (RegimeDetector 20, YieldAggregator 34, TradeOnlyAgent 19, Legs 27, KI1Reconcile 7) ✅. Verifier `check_repo.py` 0 FAIL ✅. ERC-4626 math hardened for cancelPending/reentrancy/expiry/weights ✅. Delegate `withdraw`/`redeem` anti-patterns removed (KI-7, KI-8, round-5) ✅. KI-1 stake-leg unit drift fixed (Option A, round-6) ✅. **Still to close**: invariant tests across the aggregator ↔ leg matrix (`forge invariant`, pending), integration coverage with a real-ish MockWriter instead of `_zeroSig()`, first-depositor & share-allowance fuzz. |
+| **M2: Testnet deployment** | 🟡 4 leg contracts + aggregator ✅. Round-4 closed KI-3 (BasisHedge dust guard), KI-4 (stale `latestApyBps`), KI-5 (optimistic `_allocatedTotal`). Round-5 closed KI-7 (delegate withdraw collateral) and KI-8 (redeem share-allowance category error). Round-6 closed **KI-1** (stake-leg unit drift — Option A, convert once at boundary). Round-7 closed **KI-2** (`_zeroSig()` writer stub — Option C, hybrid: perp legs accept `submitIntent`). **Only remaining open item**: **KI-6** (per-venue delegation cap — accepted spec tradeoff, documented in `DELEGATION_SPEC.md §9`); see §2.5. |
+| **M3: Audit-ready** | 🟡 Foundry test suite: **120 tests PASS** (RegimeDetector 20, YieldAggregator 34, TradeOnlyAgent 19, Legs 46 across 5 suites: LegsTest 27 + KI1ReconcileTest 7 + KI2PerpFundingTests 6 + KI2BasisHedgeTests 4 + KI2StakingLegsNegativeTest 2, AggInvariantTest 1 campaign with 3 invariants) ✅. Verifier `check_repo.py` 0 FAIL ✅. ERC-4626 math hardened for cancelPending/reentrancy/expiry/weights ✅. Delegate `withdraw`/`redeem` anti-patterns removed (KI-7, KI-8, round-5) ✅. KI-1 stake-leg unit drift fixed (Option A, round-6) ✅. KI-2 `_zeroSig()` writer stub replaced with real `submitIntent` flow (Option C, round-7) ✅. Aggregator invariants: shareValueBounded, weightsSumTo10000, noDoubleCounting (round-7) ✅. **Still to close**: integration coverage against a real `ElysiumCoreWriter` (the MockWriter covers the verifier-verification path, but not the real predeploy), first-depositor & share-allowance fuzz, deploy.py Anvil integration is in-tree but the real Anvil binary is not installed on this machine (mock RPC smoke-tested instead), audit (M4 gate). |
 | **M4: Mainnet** | ⬜ Audit passed. Governance live. First 100k USD TVL. |
 
 ## 5. Leg TODOs (in-code)
@@ -268,7 +347,7 @@ solidity/src/legs/`) and are the checklist for M2 → M3.
 | `SpotStakingLeg` | `UNBONDING_PERIOD = 24h` is a hint; confirm with HyperEVM team. | Pool's `unbondingPeriod()` is the source of truth at runtime. |
 | `PerpFundingLeg` | `HYPE_ASSET_ID = 1` is a placeholder; confirm with Kinetiq. | Writer assigns ids post-launch. |
 | `PerpFundingLeg` | `fixedApyBps` fallback when `fundingSource` is not live. | Same as staking legs. |
-| `PerpFundingLeg` | Add a `submitIntent(Delegation, Signature, uint256)` path — current stub uses `_zeroSig()`. | Production flow signs per intent. |
+| `PerpFundingLeg` | ~~Add a `submitIntent(Delegation, Signature, uint256)` path — current stub uses `_zeroSig()`.~~ | **DONE in round-7** (KI-2 closed) — see §2.5 KI-2 row and §2.7 changelog. |
 | `PerpFundingLeg` | Add `maxLeverage` and notional cap. | Safety. |
 | `PerpFundingLeg`, `BasisHedgeLeg` | Router address set by deployer — replace with production HyperCore DEX. | Router is the only spot-market primitive. |
 | `BasisHedgeLeg` | Add mark-to-market oracle for unrealised perp PnL in `currentValue()`. | Stub counts realised PnL only. |

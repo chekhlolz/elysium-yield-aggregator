@@ -376,11 +376,11 @@ contract PerpFundingLeg is IYieldLeg, IIntentSubmittingLeg {
      * Build a fresh Delegation envelope. keeper = this leg (the
      * delegator signed a delegation whose keeper is the leg address).
      *
-     * @dev This stub returns a zero-signature and a fresh nonce; the
-     *      real flow will require the delegator to sign the exact
-     *      envelope and pass `sig` in via a dedicated intent method.
-     *      TODO: add a `submitIntent(Delegation, Signature, uint256)`
-     *           path for production use.
+     * @dev This stub is used by `_writeOpen` / `_writeClose` when
+     *      `fundingSource` is unwired (test-only path). The production
+     *      flow uses `submitIntent(...)` which receives the real
+     *      (delegation, sig) pair and forwards it to the writer.
+     *      See `submitIntent` above and DESIGN_KI2_SUBMITINTENT.md §4.
      */
     function _nextDelegation(uint256 notional) internal returns (
         ITradeOnlyAgent.Delegation memory d
