@@ -61,8 +61,8 @@ contract                  abi  deployed B  creation B
 YieldAggregator            46       11055       12227
 TradeOnlyAgent              8        3103        3131
 RegimeDetector             13        2884        3160
-KHYPELeg                   26        6918        7495
-SpotStakingLeg             27        6926        7503
+KHYPELeg                   28        7743        8443
+SpotStakingLeg             29        7767        8467
 PerpFundingLeg             32        7140        7775
 BasisHedgeLeg              33        6988        7576
 SafeERC20                   0          85         135  (library)

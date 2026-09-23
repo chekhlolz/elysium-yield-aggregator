@@ -1,6 +1,19 @@
 # KI-1 (b) — Stake-Leg Rate-Tracking Divergence
 
-**Status**: design proposal · **Severity**: pre-M3 accounting correctness (HIGH) · **Blast radius**: `KHYPELeg.sol`, `SpotStakingLeg.sol` only (no interface change) · **Related**: `docs/DESIGN_KI1_UNIT_RECONCILE.md §9`, `docs/ROADMAP.md §2.5`
+**Status**: **IMPLEMENTED** (round-11, Option A2) · **Severity**: pre-M3 accounting correctness (HIGH) · **Blast radius**: `KHYPELeg.sol`, `SpotStakingLeg.sol` only (no interface change) · **Related**: `docs/DESIGN_KI1_UNIT_RECONCILE.md §9`, `docs/ROADMAP.md §2.5`
+
+> Round-11 implementation note: Option A2 was implemented as specified
+> (`pool.balanceOf` before/after `pool.stake`). One refinement from the
+> pseudocode in §5: the reduce-side stake-token burn formula uses
+> `(hypeAmount * 1e18) / rate` (i.e. inverse of the pool's
+> `creditUnbonded` redemption path), NOT the `(hypeAmount * rate) / 1e18`
+> shown in §5's `reduceFrom` snippet. The §5 formula inverts the pool's
+> credit direction; using it would systematically under-burn stake
+> tokens on any rate > 1.0 and over-credit HYPE back to the caller.
+> See §11 "Follow-up" for the full verification and rounding notes.
+> All 177 tests pass; the new `KI1aRateTrackingTest` sub-suite exercises
+> the drift bug in both directions (rate up, rate down) and pins the
+> `khypeBalance == pool.balanceOf(...)` invariant to the wei.
 
 ---
 
@@ -700,41 +713,150 @@ For the actual M2 target this is a non-issue.
 
 ## 10. Decision record
 
-**This is a DESIGN document. Implementation is deferred to a
-follow-up commit.**
+**Status**: **IMPLEMENTED in round-11** (commit "round-11: khypeBalance
+rate-tracking fix (Option A2, KI-1 drift + comment sync)").
 
-- **Status**: pending review. The design is ready for approval but
-  has not been implemented in this round.
-- **Owner for implementation**: agent F (a future agent in the
-  round-10 / round-11 workstream), who will pick up the implementation
-  once this design is approved.
-- **Expected implementation scope**: ~60 lines of Solidity changes
-  across two legs, plus ~4 new mocks methods and ~6 new tests in
-  `Legs.t.sol`. No interface change, no aggregator change, no
-  verifier change.
-- **Verification gate**: all new tests pass, all existing tests pass
-  (no regression), `check_repo.py` 0 FAIL, `forge test` green across
-  the full 171+ test suite.
-- **Rationale for deferral**: this is a round-9 review finding that
-  deserves a design round before implementation. The blast radius is
-  small but the accounting semantics change enough that a design
-  review (with the mock pool's rate-mutation surface spelled out)
-  is worth the round-trip before the code lands.
+- **Owner for implementation**: agent F, completed in round-11.
+- **Delivered scope**: ~140 lines of Solidity changes across two legs,
+  plus a settable-rate `MockStakingPool` and a 6-test
+  `KI1aRateTrackingTest` sub-suite in `Legs.t.sol`. No interface
+  change, no aggregator change, no verifier change.
+- **Verification gate**: `forge build` clean; 177 tests pass across
+  14 suites (171 prior + 6 new); `python check_repo.py .` reports
+  0 FAIL. Byte counts updated in `README.md` and `solidity/README.md`.
+- **Semantic change**: `khypeBalance` / `rewardHypeBalance` now hold
+  **stake-token counts** (not HYPE input) — enforced by the
+  `pool.balanceOf` delta on `allocateTo`, the live-rate burn on
+  `reduceFrom`, and the `khypeBalance * rate * price / 1e36` formula
+  on `currentValue()`. The invariant
+  `khypeBalance == pool.balanceOf(address(leg), address(leg))`
+  is now assertable in tests and is asserted to the wei in
+  `test_KI1a_KHYPELeg_noAccountingDrift_acrossRateChanges` and its
+  spot-staking mirror.
+- **Pseudocode deviation from §5**: the `reduceFrom` burn formula
+  uses `(hypeAmount * 1e18) / rate` (inverse of the pool's
+  `creditUnbonded` path) rather than `(hypeAmount * rate) / 1e18`
+  as §5 wrote. See §11.1 for the full explanation; using the §5
+  direction would have silently under-burned stake tokens on any
+  rate > 1.0.
 
-If the design is approved as-is, the implementation commit will:
+---
 
-1. Modify `KHYPELeg.sol` and `SpotStakingLeg.sol` per §5.
-2. Update the KI-1 comment per §5 to say "stake-token units" instead
-   of "HYPE units".
-3. Add `setRate(uint256)` to the mock staking pool.
-4. Add the six new tests from §6.
-5. Update `docs/DESIGN_KI1_UNIT_RECONCILE.md §9` to mark the
-   `khypeBalance` rate-tracking follow-up as CLOSED with a pointer
-   to this doc.
-6. Update `docs/ROADMAP.md §2.5` KI-1 row to note that the
-   rate-tracking sub-bug is now implemented (not just designed).
-7. Update `README.md` and `solidity/README.md` byte-count tables if
-   either leg's deployed size changes.
+## 10. Decision record
+
+**Status**: **IMPLEMENTED in round-11** (commit "round-11: khypeBalance
+rate-tracking fix (Option A2, KI-1 drift + comment sync)").
+
+- **Owner for implementation**: agent F, completed in round-11.
+- **Delivered scope**: ~140 lines of Solidity changes across two legs,
+  plus a settable-rate `MockStakingPool` and a 6-test
+  `KI1aRateTrackingTest` sub-suite in `Legs.t.sol`. No interface
+  change, no aggregator change, no verifier change.
+- **Verification gate**: `forge build` clean; 177 tests pass across
+  14 suites (171 prior + 6 new); `python check_repo.py .` reports
+  0 FAIL. Byte counts updated in `README.md` and `solidity/README.md`.
+- **Semantic change**: `khypeBalance` / `rewardHypeBalance` now hold
+  **stake-token counts** (not HYPE input) — enforced by the
+  `pool.balanceOf` delta on `allocateTo`, the live-rate burn on
+  `reduceFrom`, and the `khypeBalance * rate * price / 1e36` formula
+  on `currentValue()`. The invariant
+  `khypeBalance == pool.balanceOf(address(leg), address(leg))`
+  is now assertable in tests and is asserted to the wei in
+  `test_KI1a_KHYPELeg_noAccountingDrift_acrossRateChanges` and its
+  spot-staking mirror.
+
+---
+
+## 11. Follow-up — `pool.exchangeRate()` precision verification
+
+Two items worth re-checking once Kinetiq publishes the real kHYPE
+pool spec.
+
+### 11.1 The §5 `reduceFrom` pseudocode inverts the pool's credit path
+
+The `reduceFrom` snippet in §5 wrote:
+
+```solidity
+uint256 stakeTokenAmount = (hypeAmount * rate) / 1e18;
+```
+
+That direction is inconsistent with the pool's own
+`creditUnbonded` path, which returns `stakeAmount * rate / 1e18`
+HYPE per stake token burned (i.e. "1 stake token redeems for `rate`
+HYPE"). To redeem `hypeAmount` HYPE from stake tokens we must invert
+that conversion:
+
+```solidity
+// CORRECT (implemented in round-11)
+uint256 stakeTokenAmount = (hypeAmount * 1e18) / rate;
+```
+
+Both the `MockStakingPool.creditUnbonded` implementation and the
+`KHYPELeg` / `SpotStakingLeg` reduceFrom implementations use this
+corrected direction. The §5 pseudocode would have silently
+under-burned stake tokens on any rate > 1.0 and systematically
+over-credited HYPE back to the caller — exactly the kind of drift
+this fix is meant to prevent, just one direction over.
+
+### 11.2 Rounding tolerance on repeated rate moves
+
+`stakeTokenAmount = (hypeAmount * 1e18) / rate` rounds down by up
+to `rate - 1` wei of stake-token count per `reduceFrom`. On a
+single reduce this is negligible (< 1 wei of USDC impact after the
+credit-and-swap round-trip). Over a full allocate→rate-move→
+reduce→rate-move→reduce round-trip (the
+`noAccountingDrift_acrossRateChanges` test shape) the compound
+rounding is bounded by `rate` wei of stake-token count per reduce,
+which still fits well inside a single wei of USDC after the final
+mark-to-market. The tests pin the invariant to the wei:
+
+```solidity
+assertEq(leg.currentValue(),
+         (pool.balanceOf(address(leg), address(leg))
+          * rate * price) / 1e36,
+         "currentValue matches pool's mark-to-market to the wei");
+```
+
+If a future venue uses a coarser rate denominator (say 6-decimals
+instead of 18), the rounding tolerance widens proportionally and
+the `1e18` divisor in the burn formula must be swapped for the
+venue's actual rate denominator. This is the same precision check
+`IStakingPool.sol` calls out in its doc comment, and it's worth
+re-verifying against the real HyperCore kHYPE spec before M3.
+
+### 11.3 Real pool interface confirmation (carried forward from §9)
+
+The Option A2 implementation depends on
+`pool.balanceOf(address(this), address(this))` being callable by
+the leg and returning the leg's own stake-token count. If the real
+kHYPE pool hides that method behind an operator-only API or returns
+a different unit, the implementation must fall back to Option A1
+(`khypeBalance += (hypeIn * pool.exchangeRate()) / 1e18` at
+`allocateTo`) and the balance-delta invariant in §11.2 needs a
+slightly looser bound. Confirm with Kinetiq when the HyperCore
+staking pool spec is published.
+
+### 11.4 Adjacent hardening noticed but not fixed
+
+- **KI-1 (a) `khypeBalance` / `rewardHypeBalance` is not enforced
+  non-negative.** The `require(khypeBalance >= stakeTokenAmount,
+  "bad amount")` guard in `reduceFrom` catches over-reduces, but a
+  pathologically large `pool.stake` reverter (e.g. `stakeAfter <
+  stakeBefore`) would surface as `"pool mint regressed"` on
+  `allocateTo` rather than rolling back — no silent negative
+  balance. No code change needed.
+- **`currentValue()` now makes an external `pool.exchangeRate()`
+  call in the read path.** Per §4 Option A's cons, this widens the
+  surface where a pool halt would break aggregator reads. The
+  existing `pool.unstake` failure already breaks the reduce path
+  today, so this is a widening of an existing dependency, not a new
+  failure mode. Left as-is per §4.
+- **`test_KI1_KHYPELeg_reduce_no_USDC_subtracted_from_HYPE_counter`
+  still asserts the pre-round-11 HYPE-unit label.** The test's
+  numeric assertion still holds at rate 1e18 (both units coincide),
+  but the assertion message says "HYPE units" — cosmetic, left
+  unchanged to minimise churn in an otherwise-passing regression
+  test. Round-12 can reword if it matters.
 
 ---
 
@@ -743,3 +865,8 @@ response to round-9 adversarial review finding #1/#2 and finding #17.
 All `file:line` citations were verified against the working tree at
 HEAD `e01dc1d` (round-9 delegation sig canonicality commit).
 Re-verify before implementation.*
+
+*Implementation completed 2026-09-22 (round-11) at HEAD
+`4fb285b`; see §11 for the two §5 pseudocode refinements applied
+during implementation (burn-formula direction fix, and the mock
+pool's settable-rate credit path).*

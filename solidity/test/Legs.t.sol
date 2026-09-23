@@ -421,26 +421,67 @@ contract MockStakingPool is IStakingPool {
     uint256 public constant RATE_18 = 1_000_000_000_000_000_000;
     mapping(address => uint256) public staked;
     MockHYPE public hype;
+    // KI-1b (round-11): settable exchange rate so rate-tracking tests
+    // can move the pool's mark-to-market factor between calls.
+    // Default 1e18 (1:1) preserves the pre-round-11 mint/credit
+    // semantics of every existing test.
+    uint256 internal _rate = RATE_18;
+    // Stake-token amount that has been unstaked but not yet credited.
+    mapping(address => uint256) internal pending;
+
     constructor(MockHYPE _hype) { hype = _hype; }
-    function exchangeRate() external view override returns (uint256) { return RATE_18; }
+
+    function setRate(uint256 r) external {
+        require(r > 0, "zero rate");
+        _rate = r;
+    }
+
+    function exchangeRate() external view override returns (uint256) { return _rate; }
     function unbondingPeriod() external view override returns (uint256) { return 0; }
-    function stake(address, uint256 amount) external override {
+
+    function stake(address token, uint256 amount) external override {
         require(hype.balanceOf(msg.sender) >= amount, "no hype");
         hype.transferFrom(msg.sender, address(this), amount);
+        // Mint 1:1: 1 HYPE in -> 1 stake token out. Matches the
+        // design doc's worked example (DESIGN_KI1_RATE_TRACKING §1):
+        // "200 USDC @ $1, rate 1.0 -> 200 HYPE -> 200 stake tokens".
+        // Yield accrues via the mark-to-market exchangeRate() factor
+        // applied at currentValue() / credit time, NOT via additional
+        // stake-token issuance. At rate 1e18 (default) this is
+        // identical to the pre-round-11 mint, so every existing
+        // test that observes pool.staked(address(leg)) keeps its
+        // expectation.
         staked[msg.sender] += amount;
         emit Staked(msg.sender, amount);
     }
+
     function unstake(address stakeToken, uint256 amount) external override {
         require(staked[stakeToken] >= amount, "no stake tokens");
         staked[stakeToken] -= amount;
+        pending[stakeToken] += amount;
         emit Unstaked(stakeToken, amount, 0);
     }
+
     function creditUnbonded(address stakeToken, uint256 amount, address to) external override returns (uint256) {
-        require(hype.balanceOf(address(this)) >= amount, "no hype in pool");
-        hype.transfer(to, amount);
-        emit Unbonded(to, amount);
-        return amount;
+        require(pending[stakeToken] >= amount, "no pending");
+        pending[stakeToken] -= amount;
+        // Credit is the same conversion the leg uses to burn:
+        //   hypeOut = stakeAmount * rate / 1e18
+        // This is consistent with `currentValue() = stake * rate * price / 1e36`
+        // and with the doc's reduceFrom burn formula
+        // `stakeTokenAmount = (hypeAmount * rate) / 1e18`
+        // (DESIGN_KI1_RATE_TRACKING §5). At rate 1e18 (default) both
+        // collapse to 1:1, matching every pre-round-11 test's credit
+        // expectation. The mock mints the HYPE directly to the
+        // recipient to model pool yield accrual (backing grows with
+        // the rate), avoiding the need to track principal vs. yield
+        // on the pool side.
+        uint256 hypeOut = (amount * _rate) / RATE_18;
+        hype.mint(to, hypeOut);
+        emit Unbonded(to, hypeOut);
+        return hypeOut;
     }
+
     function balanceOf(address stakeToken, address account) external view override returns (uint256) {
         return staked[account];
     }
@@ -587,6 +628,283 @@ contract KI1ReconcileTest is Test {
         oracle.setPrice(PRICE_250);
         assertEq(leg.rewardHypeBalance(), 500 * 1_000_000_000_000_000_000);
         assertEq(leg.currentValue(), 1_250_000_000, "currentValue at $2.50");
+    }
+}
+
+// ==================================================================
+// KI-1 (b) rate-tracking (DESIGN_KI1_RATE_TRACKING, Option A2).
+//
+// Under the pre-round-11 code, khypeBalance / rewardHypeBalance was
+// the raw HYPE input of each allocateTo, but pool.unstake burned a
+// rate-adjusted stake-token amount. Whenever pool.exchangeRate()
+// moved, the two diverged and the drift compounded on every
+// subsequent reduceFrom.
+//
+// Round-11 (Option A2) redefines the ledger as a STAKE-TOKEN COUNT:
+//   allocateTo : khypeBalance += pool.balanceOf delta (A2 by-construction)
+//   reduceFrom : khypeBalance -= (hypeAmount * rate) / 1e18
+//   currentValue : (khypeBalance * rate * price) / 1e36
+//
+// MockStakingPool above gained a setRate() method and a live-rate
+// creditUnbonded() so these tests can move the rate between calls
+// and observe the pool's book tracking the leg's book exactly.
+// ==================================================================
+
+contract KI1aRateTrackingTest is Test {
+    address constant OWNER = address(0x1111);
+
+    MockUSDC usdc;
+    MockHYPE hype;
+    MockPriceOracle oracle;
+    MockRouter router;
+    MockStakingPool pool;
+
+    uint256 constant RATE_1E18  = 1_000_000_000_000_000_000;
+    uint256 constant PRICE_200  = 2_000_000;
+    uint256 constant USD_1000   = 1_000 * 1_000_000;
+    uint256 constant USD_500    = 500 * 1_000_000;
+    uint256 constant USD_250    = 250 * 1_000_000;
+
+    function setUp() public {
+        usdc   = new MockUSDC();
+        hype   = new MockHYPE();
+        oracle = new MockPriceOracle(PRICE_200);
+        router = new MockRouter(usdc, hype, oracle);
+        pool   = new MockStakingPool(hype);
+        // Seed the router with plenty of HYPE so it can fill
+        // USDC->HYPE swaps; the pool draws from this via stake().
+        hype.mint(address(router), 1_000_000 * 1_000_000_000_000_000_000);
+        usdc.mint(OWNER, 1_000_000 * 1_000 * 1_000);
+    }
+
+    function _deployKHYPE() internal returns (KHYPELeg) {
+        vm.startPrank(OWNER);
+        KHYPELeg leg = new KHYPELeg(address(usdc), address(hype),
+                                     address(router), address(pool),
+                                     address(oracle), 1000, 0);
+        usdc.approve(address(router), type(uint256).max);
+        vm.stopPrank();
+        return leg;
+    }
+
+    function _deploySpot() internal returns (SpotStakingLeg) {
+        vm.startPrank(OWNER);
+        SpotStakingLeg leg = new SpotStakingLeg(address(usdc), address(hype),
+                                                 address(router), address(pool),
+                                                 address(oracle), 1000, 0);
+        usdc.approve(address(router), type(uint256).max);
+        vm.stopPrank();
+        return leg;
+    }
+
+    // ---- 1. KHYPELeg currentValue tracks the pool's live rate ----
+
+    function test_KI1a_KHYPELeg_currentValue_tracksRateChange() public {
+        KHYPELeg leg = _deployKHYPE();
+        vm.startPrank(OWNER);
+        leg.allocateTo(USD_1000);
+        vm.stopPrank();
+        // $1000 @ $2/HYPE -> 500 HYPE in -> 500 stake tokens minted.
+        assertEq(leg.khypeBalance(), 500e18, "stake-token count after allocate");
+        assertEq(leg.currentValue(), USD_1000, "currentValue at rate 1.0");
+
+        // Pool's live rate rises to 1.2 -> same 500 stake tokens
+        // are now worth 500 * 1.2 = 600 HYPE @ $2 = $1200.
+        pool.setRate(1_200_000_000_000_000_000);
+        assertEq(leg.khypeBalance(), 500e18,
+                 "khypeBalance (stake-token count) unchanged by rate move");
+        assertEq(leg.currentValue(), 1_200_000_000,
+                 "currentValue re-rates to $1200 at rate 1.2");
+    }
+
+    // ---- 2. KHYPELeg reduceFrom decrements the stake-token count ----
+
+    function test_KI1a_KHYPELeg_reduce_from_decrementsStakeTokenCount() public {
+        KHYPELeg leg = _deployKHYPE();
+        vm.startPrank(OWNER);
+        leg.allocateTo(USD_1000);
+        vm.stopPrank();
+        assertEq(leg.khypeBalance(), 500e18);
+
+        pool.setRate(1_200_000_000_000_000_000);
+        vm.startPrank(OWNER);
+        uint256 returned = leg.reduceFrom(USD_500);
+        vm.stopPrank();
+        // $500 USDC @ $2/HYPE -> 250e18 HYPE.
+        // stakeTokenAmount = (250 * 1e18) / 1.2 = 208.333... stake tokens
+        // (rounded down to 208_333_333_333_333_333_333).
+        // Residual khypeBalance = 500 - 208.333... = 291.667 stake tokens.
+        uint256 expectedBurn = (250e18 * RATE_1E18) / 1_200_000_000_000_000_000;
+        assertEq(leg.khypeBalance(), 500e18 - expectedBurn,
+                 "khypeBalance = stake-token count after reduce");
+        // Pool's book matches exactly.
+        assertEq(pool.balanceOf(address(leg), address(leg)), 500e18 - expectedBurn,
+                 "pool book matches leg ledger");
+        // $500 HYPE-equivalent at rate 1.2 via credit path:
+        //   credit = burn * rate / 1e18 = 250 HYPE, but the burn was
+        //   rounded down to 208.333..., so credit is
+        //   208.333... * 1.2 = 249.9999... HYPE (rounding loss of
+        //   ~1e18 wei).
+        // At $2/HYPE that's 499_999_999_999_999_999_999 USDC units
+        // of 6 decimals, i.e. ~499.999999... USDC.
+        assertLe(returned, 500e6, "returned USDC bounded by input");
+        assertGe(returned, 499e6, "returned USDC bounded below by rounding");
+    }
+
+    // ---- 3. KHYPELeg full round-trip: no accounting drift ----
+
+    function test_KI1a_KHYPELeg_noAccountingDrift_acrossRateChanges() public {
+        KHYPELeg leg = _deployKHYPE();
+
+        vm.startPrank(OWNER);
+        leg.allocateTo(USD_1000);
+        vm.stopPrank();
+        assertEq(leg.khypeBalance(), 500e18);
+        assertEq(pool.balanceOf(address(leg), address(leg)), 500e18,
+                 "invariant holds after allocate");
+
+        // Rate up to 1.3. 500 stake tokens now worth 650 HYPE @ $2 = $1300.
+        pool.setRate(1_300_000_000_000_000_000);
+        assertEq(leg.khypeBalance(), 500e18,
+                 "khypeBalance is the stake-token count, not mark-to-market");
+        assertEq(leg.currentValue(), 1_300_000_000,
+                 "currentValue = 500 * 1.3 * $2 = $1300");
+
+        vm.startPrank(OWNER);
+        uint256 returned = leg.reduceFrom(USD_500);
+        vm.stopPrank();
+        // $500 USDC @ $2/HYPE -> 250 HYPE -> burn = 250 / 1.3 = 192.3077...
+        uint256 burn1 = (250e18 * RATE_1E18) / 1_300_000_000_000_000_000;
+        uint256 stakeAfter1 = 500e18 - burn1;
+        assertEq(leg.khypeBalance(), stakeAfter1,
+                 "residual stake-token count");
+        assertEq(pool.balanceOf(address(leg), address(leg)), stakeAfter1,
+                 "pool book == ledger book");
+        // credit = burn1 * 1.3 = 249.999... HYPE (rounding) @ $2
+        assertLe(returned, 500e6);
+        assertGe(returned, 499e6);
+
+        // Rate down to 0.7. Residual stake-token count unchanged.
+        pool.setRate(700_000_000_000_000_000);
+        assertEq(leg.khypeBalance(), stakeAfter1,
+                 "khypeBalance (stake tokens) invariant to rate move");
+        // 307.6923 * 0.7 * 2 = 430.7692 USDC
+        uint256 expectedCurrentValue =
+            (stakeAfter1 * 700_000_000_000_000_000 * 2_000_000)
+            / 1e36;
+        assertEq(leg.currentValue(), expectedCurrentValue,
+                 "currentValue re-rates to rate 0.7");
+
+        vm.startPrank(OWNER);
+        uint256 returned2 = leg.reduceFrom(USD_250);
+        vm.stopPrank();
+        // $250 USDC @ $2/HYPE -> 125 HYPE -> burn = 125 / 0.7 = 178.5714...
+        uint256 burn2 = (125e18 * RATE_1E18) / 700_000_000_000_000_000;
+        uint256 residualStake = stakeAfter1 - burn2;
+        assertEq(leg.khypeBalance(), residualStake,
+                 "final residual stake-token count matches arithmetic");
+        assertEq(pool.balanceOf(address(leg), address(leg)), residualStake,
+                 "pool book == ledger book (final)");
+        // credit = burn2 * 0.7 = 124.9999... HYPE @ $2
+        assertLe(returned2, 250e6);
+        assertGe(returned2, 249e6);
+
+        // Residual currentValue = stake * 0.7 * 2 = pool.book * rate * price / 1e36.
+        assertEq(leg.currentValue(),
+                 (pool.balanceOf(address(leg), address(leg))
+                  * 700_000_000_000_000_000 * 2_000_000)
+                 / 1e36,
+                 "currentValue matches pool's mark-to-market to the wei");
+    }
+
+    // ---- 4. SpotStakingLeg currentValue tracks the pool's live rate ----
+
+    function test_KI1a_SpotStakingLeg_currentValue_tracksRateChange() public {
+        SpotStakingLeg leg = _deploySpot();
+        vm.startPrank(OWNER);
+        leg.allocateTo(USD_1000);
+        vm.stopPrank();
+        assertEq(leg.rewardHypeBalance(), 500e18,
+                 "stake-token count after allocate");
+        assertEq(leg.currentValue(), USD_1000, "currentValue at rate 1.0");
+
+        pool.setRate(1_200_000_000_000_000_000);
+        assertEq(leg.rewardHypeBalance(), 500e18,
+                 "rewardHypeBalance unchanged by rate move");
+        assertEq(leg.currentValue(), 1_200_000_000,
+                 "currentValue re-rates to $1200 at rate 1.2");
+    }
+
+    // ---- 5. SpotStakingLeg reduceFrom decrements the stake-token count ----
+
+    function test_KI1a_SpotStakingLeg_reduce_from_decrementsStakeTokenCount() public {
+        SpotStakingLeg leg = _deploySpot();
+        vm.startPrank(OWNER);
+        leg.allocateTo(USD_1000);
+        vm.stopPrank();
+        assertEq(leg.rewardHypeBalance(), 500e18);
+
+        pool.setRate(1_200_000_000_000_000_000);
+        vm.startPrank(OWNER);
+        uint256 returned = leg.reduceFrom(USD_500);
+        vm.stopPrank();
+        // $250 HYPE @ $2 -> burn = 250 / 1.2 = 208.333... stake tokens.
+        uint256 expectedBurn = (250e18 * RATE_1E18) / 1_200_000_000_000_000_000;
+        assertEq(leg.rewardHypeBalance(), 500e18 - expectedBurn,
+                 "rewardHypeBalance = stake-token count after reduce");
+        assertEq(pool.balanceOf(address(leg), address(leg)), 500e18 - expectedBurn,
+                 "pool book matches ledger");
+        assertLe(returned, 500e6, "returned USDC bounded by input");
+        assertGe(returned, 499e6, "returned USDC bounded below by rounding");
+    }
+
+    // ---- 6. SpotStakingLeg full round-trip: no accounting drift ----
+
+    function test_KI1a_SpotStakingLeg_noAccountingDrift_acrossRateChanges() public {
+        SpotStakingLeg leg = _deploySpot();
+
+        vm.startPrank(OWNER);
+        leg.allocateTo(USD_1000);
+        vm.stopPrank();
+        assertEq(leg.rewardHypeBalance(), 500e18);
+        assertEq(pool.balanceOf(address(leg), address(leg)), 500e18,
+                 "invariant holds after allocate");
+
+        pool.setRate(1_300_000_000_000_000_000);
+        assertEq(leg.rewardHypeBalance(), 500e18);
+        assertEq(leg.currentValue(), 1_300_000_000);
+
+        vm.startPrank(OWNER);
+        uint256 returned = leg.reduceFrom(USD_500);
+        vm.stopPrank();
+        uint256 burn1 = (250e18 * RATE_1E18) / 1_300_000_000_000_000_000;
+        uint256 stakeAfter1 = 500e18 - burn1;
+        assertEq(leg.rewardHypeBalance(), stakeAfter1);
+        assertEq(pool.balanceOf(address(leg), address(leg)), stakeAfter1,
+                 "pool book == ledger book");
+        assertLe(returned, 500e6);
+        assertGe(returned, 499e6);
+
+        pool.setRate(700_000_000_000_000_000);
+        assertEq(leg.rewardHypeBalance(), stakeAfter1);
+        uint256 expectedCurrentValue =
+            (stakeAfter1 * 700_000_000_000_000_000 * 2_000_000) / 1e36;
+        assertEq(leg.currentValue(), expectedCurrentValue);
+
+        vm.startPrank(OWNER);
+        uint256 returned2 = leg.reduceFrom(USD_250);
+        vm.stopPrank();
+        uint256 burn2 = (125e18 * RATE_1E18) / 700_000_000_000_000_000;
+        uint256 residualStake = stakeAfter1 - burn2;
+        assertEq(leg.rewardHypeBalance(), residualStake);
+        assertEq(pool.balanceOf(address(leg), address(leg)), residualStake,
+                 "pool book == ledger book (final)");
+        assertLe(returned2, 250e6);
+        assertGe(returned2, 249e6);
+        assertEq(leg.currentValue(),
+                 (pool.balanceOf(address(leg), address(leg))
+                  * 700_000_000_000_000_000 * 2_000_000)
+                 / 1e36);
     }
 }
 

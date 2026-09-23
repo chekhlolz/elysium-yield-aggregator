@@ -123,18 +123,26 @@ contract KHYPELeg is IYieldLeg {
     }
 
     /**
-     * KI-1 (Option A, DESIGN_KI1_UNIT_RECONCILE): khypeBalance is now
-     * tracked in HYPE units (18 dec) -- the pool.exchangeRate() factor
-     * is folded in at the boundary (allocateTo), so the valuation
-     * math collapses to `hype * price`.
+     * KI-1 (b) rate-tracking (DESIGN_KI1_RATE_TRACKING, Option A2):
+     * khypeBalance is tracked in STAKE-TOKEN units (18 dec) — the pool's
+     * exchangeRate() factor is applied at the boundary (allocateTo) via
+     * a pool.balanceOf before/after delta, so that
+     *   khypeBalance == pool.balanceOf(address(this), address(this))
+     * holds by construction. currentValue() re-applies the live rate
+     * before multiplying by the USDC/HYPE price, so the valuation tracks
+     * the pool's mark-to-market value of the same stake-token position.
      */
     function currentValue() external view returns (uint256) {
         uint256 v = 0;
         if (khypeBalance > 0) {
             uint256 price = _hypePriceUsdc();
-            // khypeBalance is 18-dec HYPE, price is 6-dec USDC/HYPE.
-            // value_6dec = khypeBalance * price / 1e18 (cancel 18-dec HYPE).
-            v = (khypeBalance * price) / 1_000_000_000_000_000_000;
+            uint256 rate  = pool.exchangeRate();
+            // khypeBalance is 18-dec stake tokens, rate is 18-dec
+            // (stake->HYPE), price is 6-dec USDC/HYPE.
+            // v_6dec = khypeBalance * rate * price / 1e36
+            //   (cancel 18-dec stake, 18-dec HYPE, keep 6-dec USDC).
+            v = (khypeBalance * rate * price)
+                / 1_000_000_000_000_000_000_000_000_000_000_000_000;
         }
         v += usdc.balanceOf(address(this));
         return v;
@@ -144,15 +152,15 @@ contract KHYPELeg is IYieldLeg {
         require(msg.sender == owner, "not owner");
         require(usdAmount > 0, "zero");
 
-        // KI-1 (Option A): convert USDC -> HYPE at the live oracle
-        // price, and track the HYPE-equivalent for the on-book balance.
-        // currentValue() then collapses to `khypeBalance * price`.
-        //
-        // NOTE (§9.1 of DESIGN_KI1_UNIT_RECONCILE): khypeBalance is
-        // incremented by the ROUTER RETURN VALUE (`hypeIn`), not by
-        // `pool.balanceOf(...)`. The pool's total balance includes all
-        // prior stakes, so adding it would double-count on repeat
-        // allocations. This is the round-6 fix.
+        // KI-1 (b) rate-tracking (DESIGN_KI1_RATE_TRACKING, Option A2):
+        // khypeBalance is now in STAKE-TOKEN units. We capture the pool's
+        // own stake-token balance before and after pool.stake() and add
+        // the DELTA -- never the raw router return, never the pool's
+        // total. The delta is exact by construction and matches what the
+        // pool actually minted at its live exchange rate at stake time.
+        // (Replaces the round-6 §9.1 `hypeIn`-based pattern, which was
+        // correct in unit-tracking but wrong about which unit the
+        // pool mutates: HYPE input vs. stake-token count.)
         uint256 price = _hypePriceUsdc();
         require(price > 0, "no oracle price");
 
@@ -175,10 +183,17 @@ contract KHYPELeg is IYieldLeg {
             require(hypeIn >= hypeMin, "slippage exceeded");
         }
 
+        // KI-1 (b) Option A2: capture stake-token delta before/after
+        // pool.stake. khypeBalance is a stake-token count, matching
+        // the unit the pool actually mints.
+        uint256 stakeBefore = pool.balanceOf(address(this), address(this));
+
         hype.safeApprove(address(pool), hypeIn);
         pool.stake(address(hype), hypeIn);
 
-        khypeBalance += hypeIn;
+        uint256 stakeAfter = pool.balanceOf(address(this), address(this));
+        require(stakeAfter >= stakeBefore, "pool mint regressed");
+        khypeBalance += (stakeAfter - stakeBefore);
         allocatedUsd += usdAmount;
 
         _recordApy(expectedApy());
@@ -210,28 +225,45 @@ contract KHYPELeg is IYieldLeg {
     function reduceFrom(uint256 usdAmount) external nonReentrant returns (uint256 returnedUsd) {
         require(msg.sender == owner, "not owner");
 
-        // KI-1 (Option A): convert USDC -> HYPE at the live oracle
-        // price, then convert HYPE -> stake tokens via the pool's
-        // current exchangeRate(). Call pool.unstake with the stake-
-        // token amount -- never with the raw USDC amount.
+        // KI-1 (b) rate-tracking (DESIGN_KI1_RATE_TRACKING, Option A2):
+        // khypeBalance is a stake-token count, so we must compute the
+        // stake-token amount to burn BEFORE decrementing the ledger.
+        // The pool's book (stake tokens) and our book (khypeBalance)
+        // now speak the same unit -- khypeBalance -= stakeTokenAmount
+        // is exact and keeps khypeBalance == pool.balanceOf(...) the
+        // invariant by construction.
         require(usdAmount > 0, "bad amount");
         require(khypeBalance > 0, "bad amount");
         uint256 price = _hypePriceUsdc();
         require(price > 0, "no oracle price");
         // usdAmount is 6-dec, price is 6-dec, HYPE is 18-dec:
-        //   hypeAmount = (usdAmount * 1e12) / price
-        // usdAmount is 6-dec, price is 6-dec, HYPE is 18-dec:
         //   hypeAmount = (usdAmount * 1e18) / price
         uint256 hypeAmount = (usdAmount * 1_000_000_000_000_000_000) / price;
-        require(khypeBalance >= hypeAmount, "bad amount");
-
-        khypeBalance -= hypeAmount;
 
         // Convert HYPE amount to stake tokens via the live pool rate.
+        // Under the pool's convention (DESIGN_KI1_RATE_TRACKING §1):
+        //   1 stake token = exchangeRate()/1e18 HYPE.
+        // Inverting: 1 HYPE = 1e18 / rate stake tokens, so
+        //   stakeTokenAmount = (hypeAmount * 1e18) / rate
+        // which is the inverse of `pool.creditUnbonded`'s
+        // `hypeOut = stakeAmount * rate / 1e18` and keeps
+        // currentValue() = stake * rate * price / 1e36 consistent
+        // with what a real pool redemption would return.
+        //
+        // NOTE: DESIGN_KI1_RATE_TRACKING §5 wrote this as
+        // `(hypeAmount * rate) / 1e18`; that direction inverts the
+        // pool's credit path and would systematically under-burn
+        // stake tokens on any rate > 1.0. This leg uses the
+        // corrected direction -- see the doc's §11 follow-up.
         uint256 rate = pool.exchangeRate();
         require(rate > 0, "pool rate is 0");
-        uint256 stakeTokenAmount = (hypeAmount * rate) / 1_000_000_000_000_000_000;
+        uint256 stakeTokenAmount = (hypeAmount * 1_000_000_000_000_000_000) / rate;
         require(stakeTokenAmount > 0, "zero stake amount");
+        require(khypeBalance >= stakeTokenAmount, "bad amount");
+
+        // KI-1 (b): decrement the stake-token counter, not the raw
+        // HYPE input -- matches what pool.unstake burns.
+        khypeBalance -= stakeTokenAmount;
 
         pool.unstake(address(this), stakeTokenAmount);
 
