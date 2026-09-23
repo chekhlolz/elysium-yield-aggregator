@@ -58,8 +58,8 @@ Fresh build stats (source of truth; regenerate with `python scripts/compile.py`)
 
 ```
 contract                  abi  deployed B  creation B
-YieldAggregator            46       10979       12151
-TradeOnlyAgent              8        2811        2839
+YieldAggregator            46       11055       12227
+TradeOnlyAgent              8        3103        3131
 RegimeDetector             13        2884        3160
 KHYPELeg                   26        6918        7495
 SpotStakingLeg             27        6926        7503
@@ -86,7 +86,7 @@ preview methods are required by ERC-4626).
 
 ## Key design decisions
 
-### YieldAggregator (12.2 KB creation bytecode, 11.0 KB deployed)
+### YieldAggregator (12.2 KB creation bytecode, 11.1 KB deployed)
 
 - **ERC-4626** canonical surface: `deposit` / `mint` / `withdraw` /
   `redeem` / `previewDeposit` / `previewMint` / `previewWithdraw` /
@@ -119,7 +119,7 @@ preview methods are required by ERC-4626).
 - `observe()` is read/write — stores the latest snapshot. No gas spent
   by the aggregator on market data reads until the precompile ships.
 
-### TradeOnlyAgent (2.8 KB bytecode)
+### TradeOnlyAgent (3.1 KB bytecode)
 
 - **EIP-712** typed signatures, domain-separated by `chainId`.
 - **Delegation struct**: keeper, assetIds (empty = all), maxNotional,
@@ -154,8 +154,8 @@ mock-friendly dependency interface. See `docs/ROADMAP.md §5` for the
 
 | Contract | Creation B | Deployed B | Purpose |
 |---|---:|---:|---|
-| YieldAggregator | 12 151 | 10 979 | Vault + keeper + timelock |
-| TradeOnlyAgent | 2 839 | 2 811 | EIP-712 delegation |
+| YieldAggregator | 12 227 | 11 055 | Vault + keeper + timelock |
+| TradeOnlyAgent | 3 131 | 3 103 | EIP-712 delegation |
 | RegimeDetector | 3 160 | 2 884 | Market-data adapter |
 | KHYPELeg | 7 899 | 7 220 | kHYPE LST leg |
 | SpotStakingLeg | 7 922 | 7 243 | Spot-staking leg |
@@ -164,7 +164,7 @@ mock-friendly dependency interface. See `docs/ROADMAP.md §5` for the
 
 Total: **~47.2 KB** across all contracts (including the `SafeERC20`
 library and `RegimeId` enum). Per-contract, the largest is
-`YieldAggregator` at 12.4 KB creation — well under the 24 KB EVM
+`YieldAggregator` at 12.2 KB creation — well under the 24 KB EVM
 contract-size cap. The "300 Mgas/s execution budget" figure in the
 Elysium docs is a throughput claim, not a size limit, so it is not
 the right comparison here.

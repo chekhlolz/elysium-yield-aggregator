@@ -249,24 +249,33 @@ contract TradeOnlyAgentTest is Test {
         ITradeOnlyAgent.Delegation memory d = _mkDelegation(
             KEEPER, 1000, 500, 0, 1, bytes32(uint256(1))
         );
-        // Use 900 of 1000, then another 200 must fail (900+200 > 1000).
+        // Fill the 1000 notional cap with two 490-orders (under the 500
+        // per-order cap), then 20 more should overflow.
         vm.prank(VENUE);
-        assertTrue(agent.recordExecution(VENUE, DELEGATOR, d, 900, bytes32(uint256(1)), 0));
+        assertTrue(agent.recordExecution(VENUE, DELEGATOR, d, 490, bytes32(uint256(1)), 0));
         vm.prank(VENUE);
-        assertFalse(agent.recordExecution(VENUE, DELEGATOR, d, 200, bytes32(uint256(1)), 0));
-        assertEq(agent.remainingNotional(VENUE, DELEGATOR, d), 100);
+        assertTrue(agent.recordExecution(VENUE, DELEGATOR, d, 490, bytes32(uint256(1)), 0));
+        // 980 used, 20 remaining. One more 490 would exceed cap.
+        vm.prank(VENUE);
+        assertFalse(agent.recordExecution(VENUE, DELEGATOR, d, 490, bytes32(uint256(1)), 0));
+        assertEq(agent.remainingNotional(VENUE, DELEGATOR, d), 20);
     }
 
     function test_recordExecution_perVenueIsolation() public {
         ITradeOnlyAgent.Delegation memory d = _mkDelegation(
             KEEPER, 1000, 500, 0, 1, bytes32(uint256(1))
         );
-        // Venue A consumes 1000 (full cap). Venue B still has the full cap.
+        // Venue A fills its 1000 notional cap via two 500-orders.
+        // Venue B still has its own full 1000 cap.
         address venueB = address(0xEE00);
         vm.prank(VENUE);
-        assertTrue(agent.recordExecution(VENUE, DELEGATOR, d, 1000, bytes32(uint256(1)), 0));
+        assertTrue(agent.recordExecution(VENUE, DELEGATOR, d, 500, bytes32(uint256(1)), 0));
+        vm.prank(VENUE);
+        assertTrue(agent.recordExecution(VENUE, DELEGATOR, d, 500, bytes32(uint256(1)), 0));
         vm.prank(venueB);
-        assertTrue(agent.recordExecution(venueB, DELEGATOR, d, 1000, bytes32(uint256(1)), 0));
+        assertTrue(agent.recordExecution(venueB, DELEGATOR, d, 500, bytes32(uint256(1)), 0));
+        vm.prank(venueB);
+        assertTrue(agent.recordExecution(venueB, DELEGATOR, d, 500, bytes32(uint256(1)), 0));
         assertEq(agent.remainingNotional(VENUE, DELEGATOR, d), 0);
         assertEq(agent.remainingNotional(venueB, DELEGATOR, d), 0);
     }
@@ -289,5 +298,92 @@ contract TradeOnlyAgentTest is Test {
         ITradeOnlyAgent.Delegation memory d = _mkEmptyDelegation();
         ITradeOnlyAgent.Signature memory sig = _sign(DELEGATOR_PK, DELEGATOR, d);
         assertTrue(agent.isValidDelegation(DELEGATOR, d, sig));
+    }
+
+    // ---- Finding #5: canonical ECDSA (r, s, v) ----
+
+    /// @dev Regression: a properly signed delegation is still accepted.
+    function test_accept_canonical_signature() public view {
+        ITradeOnlyAgent.Delegation memory d = _mkDelegation(
+            KEEPER, 1000, 500, 0, 1, bytes32(uint256(1))
+        );
+        ITradeOnlyAgent.Signature memory sig = _sign(DELEGATOR_PK, DELEGATOR, d);
+        // Sanity-check the constant used in _recover. secp256k1.order / 2.
+        // canonical s must satisfy s <= (n-1)/2, which is equivalent to
+        // s < (n+1)/2 = (n-1)/2 + 1 since n is odd.
+        assertLt(
+            uint256(sig.s),
+            0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A1
+        );
+        assertTrue(agent.isValidDelegation(DELEGATOR, d, sig));
+    }
+
+    /// @dev r == 0 must revert with "zero r".
+    function test_reject_zero_r() public {
+        ITradeOnlyAgent.Delegation memory d = _mkDelegation(
+            KEEPER, 1000, 500, 0, 1, bytes32(uint256(1))
+        );
+        ITradeOnlyAgent.Signature memory sig = _sign(DELEGATOR_PK, DELEGATOR, d);
+        sig.r = bytes32(0);
+        vm.expectRevert("zero r");
+        agent.isValidDelegation(DELEGATOR, d, sig);
+    }
+
+    /// @dev s == 0 must revert with "zero s".
+    function test_reject_zero_s() public {
+        ITradeOnlyAgent.Delegation memory d = _mkDelegation(
+            KEEPER, 1000, 500, 0, 1, bytes32(uint256(1))
+        );
+        ITradeOnlyAgent.Signature memory sig = _sign(DELEGATOR_PK, DELEGATOR, d);
+        sig.s = bytes32(0);
+        vm.expectRevert("zero s");
+        agent.isValidDelegation(DELEGATOR, d, sig);
+    }
+
+    /// @dev s > secp256k1.order / 2 must revert with "non-canonical s".
+    /// The EIP-2 low-s flip of a valid s is (order - s); since s < order/2
+    /// originally, (order - s) > order/2, so we always land above the bound.
+    function test_reject_non_canonical_s() public {
+        ITradeOnlyAgent.Delegation memory d = _mkDelegation(
+            KEEPER, 1000, 500, 0, 1, bytes32(uint256(1))
+        );
+        ITradeOnlyAgent.Signature memory sig = _sign(DELEGATOR_PK, DELEGATOR, d);
+        // secp256k1.order
+        uint256 order = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
+        bytes32 lowS = sig.s;
+        assertLt(uint256(lowS), order / 2);
+        // Flip to high-s form. This is a signature that would still recover
+        // the correct address on ecrecover, but is non-canonical.
+        sig.s = bytes32(order - uint256(lowS));
+        vm.expectRevert("non-canonical s");
+        agent.isValidDelegation(DELEGATOR, d, sig);
+    }
+
+    // ---- Finding #6: recordExecution enforces maxPerOrder ----
+
+    function test_recordExecution_rejects_overPerOrderCap() public {
+        ITradeOnlyAgent.Delegation memory d = _mkDelegation(
+            KEEPER, 1000, 500, 0, 1, bytes32(uint256(1))
+        );
+        // 600 > 500 per-order cap. Even though it fits within the 1000
+        // notional cap, it must revert with "per-order cap".
+        vm.prank(VENUE);
+        vm.expectRevert("per-order cap");
+        agent.recordExecution(VENUE, DELEGATOR, d, 600, bytes32(uint256(1)), 0);
+    }
+
+    function test_recordExecution_accepts_atPerOrderCap() public {
+        ITradeOnlyAgent.Delegation memory d = _mkDelegation(
+            KEEPER, 1000, 500, 0, 1, bytes32(uint256(1))
+        );
+        // Exactly 500: notional <= maxPerOrder, and fits within 1000 cap.
+        vm.prank(VENUE);
+        assertTrue(agent.recordExecution(VENUE, DELEGATOR, d, 500, bytes32(uint256(1)), 0));
+        assertEq(agent.remainingNotional(VENUE, DELEGATOR, d), 500);
+        // A second 500-order is still within the 1000 notional cap and
+        // at the per-order cap - also accepted.
+        vm.prank(VENUE);
+        assertTrue(agent.recordExecution(VENUE, DELEGATOR, d, 500, bytes32(uint256(1)), 0));
+        assertEq(agent.remainingNotional(VENUE, DELEGATOR, d), 0);
     }
 }

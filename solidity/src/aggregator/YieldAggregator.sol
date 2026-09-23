@@ -370,6 +370,12 @@ contract YieldAggregator {
         emit KeeperUpdated(newKeeper);
     }
     function setTimelock(uint32 _ts) external onlyOwner {
+        // Finding #12: block the owner from setting timelock=0, which
+        // would let a compromised keeper request+execute rebalances in
+        // a single transaction (or same-block grief if blocks are fast).
+        // 60s is the minimum floor; production deployments should tune
+        // far higher.
+        require(_ts >= 60, "timelock below 60s");
         timelockSeconds = _ts;
     }
 

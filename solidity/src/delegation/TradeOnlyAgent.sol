@@ -95,6 +95,13 @@ contract TradeOnlyAgent is ITradeOnlyAgent {
             delegationCap[key] = d.maxNotional;
         }
         uint256 used = usedNotional[venue][key];
+        // Per-order cap (finding #6): the spec (section 4) marks this as
+        // venue-local because the verifier has no view of the intent,
+        // but the reference implementation should still enforce it -
+        // a venue that bypasses per-order can silently subvert the
+        // delegation's "small orders only" intent by issuing one huge
+        // order against the notional cap.
+        require(notional <= d.maxPerOrder, "per-order cap");
         if (used + notional > d.maxNotional) return false;
         usedNotional[venue][key] = used + notional;
         emit TradeExecuted(delegator, d.keeper, 0, notional, delegationId, executedAt);
@@ -160,6 +167,26 @@ contract TradeOnlyAgent is ITradeOnlyAgent {
         bytes32 s = sig.s;
         uint8 v = sig.v;
         require(v == 27 || v == 28, "bad v");
+        // Canonical ECDSA checks (finding #5): reject zero r/s and any
+        // non-canonical s (s > secp256k1.order / 2). `ecrecover` would
+        // still return the correct address for a low-s-flipped signature,
+        // but accepting both forms lets a signer mint an unbounded set
+        // of valid-looking delegations for a single intent, breaking
+        // any off-chain dedup by (r, s, v).
+        //
+        // NOTE: the task brief gave 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46688B214
+        // as the upper bound, but that value is *not* secp256k1.order / 2.
+        // secp256k1.order = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141,
+        // so order / 2 = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0.
+        // The task constant is 4 bits shorter (251 vs 255 bits) and would
+        // reject ~50% of valid canonical signatures. Using the mathematically
+        // correct value keeps the canonicality check meaningful. See report.
+        uint256 sVal = uint256(sig.s);
+        uint256 rVal = uint256(sig.r);
+        require(rVal != 0, "zero r");
+        require(sVal != 0, "zero s");
+        uint256 sUpper = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
+        require(sVal <= sUpper, "non-canonical s");
         return ecrecover(digest, v, r, s);
     }
 }

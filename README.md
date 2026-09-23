@@ -144,8 +144,8 @@ landed this week — see `docs/ROADMAP.md §2.1`:
 
 | File | Bytes | ABI entries |
 |---|---|---|
-| `src/aggregator/YieldAggregator.sol` | 10,979 | 46 |
-| `src/delegation/TradeOnlyAgent.sol` | 2,811 | 8 |
+| `src/aggregator/YieldAggregator.sol` | 11,055 | 46 |
+| `src/delegation/TradeOnlyAgent.sol` | 3,103 | 8 |
 | `src/keeper/RegimeDetector.sol` | 2,884 | 13 |
 | `src/legs/KHYPELeg.sol` | 7,220 | 28 |
 | `src/legs/SpotStakingLeg.sol` | 7,243 | 29 |
@@ -161,7 +161,7 @@ landed this week — see `docs/ROADMAP.md §2.1`:
 | `src/interfaces/IPriceOracle.sol` | 0 | 2 |
 | `src/interfaces/IStakingPool.sol` | 0 | 9 |
 
-Total: 47,232 bytes across all contracts (including the `SafeERC20`
+Total: 47,600 bytes across all contracts (including the `SafeERC20`
 library, `RegimeId` enum, and the minimal `IERC20Minimal` facade).
 
 The four `IYieldLeg` implementations are the actual yield venues the

@@ -24,8 +24,15 @@ interface ITradeOnlyAgent {
         /// "Per-venue notional cap" entry in docs/DELEGATION_SPEC.md §9.
         uint256 maxNotional;   // USD per venue (6 decimals)
         uint256 maxPerOrder;   // USD per single order (6 decimals)
-        /// Unix ts; 0 = never expires. The verifier short-circuits on
-        /// `d.expiresAt == 0` and treats that as "no expiry".
+        /// Unix ts; 0 = never expires (the "no expiry" sentinel).
+        /// The verifier must NOT short-circuit on `d.expiresAt == 0` -
+        /// that sentinel only means "skip the expiry-of-this-delegation
+        /// check". All other validation (signature, keeper non-zero,
+        /// cap fields non-zero, revocation, and any expiry check on
+        /// OTHER delegations from the same delegator) still runs.
+        /// FIX-21 (round-3 P0) made this explicit; a prior version
+        /// returned `true` for any never-expires delegation, letting a
+        /// revoked keeper keep trading under pre-existing delegations.
         uint64  expiresAt;
         uint64  nonce;         // user-chosen for ordering / de-duplication
         bytes32  salt;         // user-chosen for uniqueness

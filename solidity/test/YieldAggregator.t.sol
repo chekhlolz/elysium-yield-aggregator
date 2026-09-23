@@ -701,4 +701,33 @@ contract YieldAggregatorTest is Test {
     function test_previewRedeem_matchesConvertToAssets() public view {
         assertEq(agg.previewRedeem(500 ether), agg.convertToAssets(500 ether));
     }
+
+    // ---- Finding #12: setTimelock floor ----
+
+    function test_setTimelock_rejectsBelowMinimum() public {
+        vm.prank(OWNER);
+        vm.expectRevert("timelock below 60s");
+        agg.setTimelock(0);
+        vm.prank(OWNER);
+        vm.expectRevert("timelock below 60s");
+        agg.setTimelock(59);
+    }
+
+    function test_setTimelock_acceptsMinimum() public {
+        vm.prank(OWNER);
+        agg.setTimelock(60);
+        assertEq(agg.timelockSeconds(), 60);
+    }
+
+    function test_setTimelock_acceptsHigherValue() public {
+        vm.prank(OWNER);
+        agg.setTimelock(3600);
+        assertEq(agg.timelockSeconds(), 3600);
+    }
+
+    function test_setTimelock_requiresOwner() public {
+        vm.prank(ALICE);
+        vm.expectRevert("not owner");
+        agg.setTimelock(3600);
+    }
 }

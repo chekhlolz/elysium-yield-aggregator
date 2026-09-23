@@ -517,51 +517,66 @@ contract FuzzCoverageTest is Test {
     // ----------------------------------------------------------------- #
 
     /// `isValidDelegation` must NEVER panic on a malformed signature.
+    /// Round-9 canonicality hardening added explicit reverts for
+    /// r==0, s==0, and s > secp256k1.order/2. Those reverts are
+    /// intentional (not panics) and satisfy the "never panics" goal:
+    /// an explicit revert is a clean rejection, not an arithmetic
+    /// underflow or stack overflow.
+    ///
     /// For v ∈ [29, 30] the contract's `_recover` requires v ∈ {27, 28}
-    /// and reverts with "bad v"; for v ∈ {27, 28} with extreme r/s,
-    /// `ecrecover` returns address(0) or a wrong address, so
-    /// `isValidDelegation` returns false. Both behaviours are acceptable
-    /// — we assert "no panic" by checking one of those two.
+    /// and reverts with "bad v". For v ∈ {27, 28} with r=0 or s=0 the
+    /// new checks revert; for non-canonical s the check reverts; for
+    /// canonical r/s, `ecrecover` runs and may return address(0) or a
+    /// wrong address (in which case `isValidDelegation` returns false).
     function testFuzz_signatureRecovery_neverPanics(uint8 v, bytes32 r, bytes32 s) public {
         address delegator = delegatorAddr();
         ITradeOnlyAgent.Delegation memory d = _mkDelegation(
             keeperAddr(), 1000, 500, 0, 1, bytes32(uint256(1))
         );
-        if (v >= 29) {
+        if (v >= 29 || v < 27) {
             // _recover requires v ∈ {27, 28}; the invalid-v branch reverts.
             // This is NOT a panic — the revert is intentional and the
             // gap-doc §6 spec calls for "never panics" (reverts are OK).
             vm.expectRevert("bad v");
             agent.isValidDelegation(delegator, d, ITradeOnlyAgent.Signature(v, r, s));
-        } else if (v < 27) {
-            vm.expectRevert("bad v");
-            agent.isValidDelegation(delegator, d, ITradeOnlyAgent.Signature(v, r, s));
         } else {
-            // v ∈ {27, 28}: ecrecover runs, may return address(0) or a
-            // wrong address; isValidDelegation returns false (no panic).
-            assertFalse(agent.isValidDelegation(
-                delegator, d, ITradeOnlyAgent.Signature(v, r, s)),
-                "garbage signature must not validate");
+            // v ∈ {27, 28}: branch on r/s values.
+            if (uint256(r) == 0) {
+                vm.expectRevert("zero r");
+                agent.isValidDelegation(delegator, d, ITradeOnlyAgent.Signature(v, r, s));
+            } else if (uint256(s) == 0) {
+                vm.expectRevert("zero s");
+                agent.isValidDelegation(delegator, d, ITradeOnlyAgent.Signature(v, r, s));
+            } else if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
+                vm.expectRevert("non-canonical s");
+                agent.isValidDelegation(delegator, d, ITradeOnlyAgent.Signature(v, r, s));
+            } else {
+                // Canonical r/s: ecrecover runs, may return address(0)
+                // or a wrong address; isValidDelegation returns false.
+                assertFalse(agent.isValidDelegation(
+                    delegator, d, ITradeOnlyAgent.Signature(v, r, s)),
+                    "garbage signature must not validate");
+            }
         }
     }
 
-    /// `v` at the exact 27/28 boundary with r = 0 and s = 0 (illegal
-    /// signature parameters). `ecrecover` returns address(0) for r=0 or
-    /// s=0, so `isValidDelegation` returns false. No panic.
+    /// `v` at the exact 27/28 boundary with r = 0 and s = 0. Round-9
+    /// canonicality hardening rejects these explicitly via require; the
+    /// first failing require is "zero r" (r is checked before s).
     function testFuzz_signatureRecovery_zeroRS(uint8 v) public {
         v = uint8(bound(v, 27, 28));
         address delegator = delegatorAddr();
         ITradeOnlyAgent.Delegation memory d = _mkDelegation(
             keeperAddr(), 1000, 500, 0, 1, bytes32(uint256(1))
         );
-        assertFalse(agent.isValidDelegation(
-            delegator, d, ITradeOnlyAgent.Signature(v, bytes32(0), bytes32(0))),
-            "r=0, s=0 must not validate");
+        vm.expectRevert("zero r");
+        agent.isValidDelegation(
+            delegator, d, ITradeOnlyAgent.Signature(v, bytes32(0), bytes32(0))
+        );
     }
 
     /// `v` at the exact 27/28 boundary with r = s = 0xff...ff (max).
-    /// ecrecover may return address(0) or a wrong address; the contract
-    /// must not panic.
+    /// s = MAX > secp256k1.order/2, so the non-canonical-s check reverts.
     function testFuzz_signatureRecovery_maxRS(uint8 v) public {
         v = uint8(bound(v, 27, 28));
         bytes32 max = bytes32(type(uint256).max);
@@ -569,9 +584,10 @@ contract FuzzCoverageTest is Test {
         ITradeOnlyAgent.Delegation memory d = _mkDelegation(
             keeperAddr(), 1000, 500, 0, 1, bytes32(uint256(1))
         );
-        assertFalse(agent.isValidDelegation(
-            delegator, d, ITradeOnlyAgent.Signature(v, max, max)),
-            "r=MAX, s=MAX must not validate");
+        vm.expectRevert("non-canonical s");
+        agent.isValidDelegation(
+            delegator, d, ITradeOnlyAgent.Signature(v, max, max)
+        );
     }
 
     /// `v` outside [27, 28] must revert with "bad v", not panic.
