@@ -60,7 +60,7 @@ Fresh build stats (source of truth; regenerate with `python scripts/compile.py`)
 contract                  abi  deployed B  creation B
 YieldAggregator            46       10979       12151
 TradeOnlyAgent              8        2811        2839
-RegimeDetector             13        2650        2926
+RegimeDetector             13        2884        3160
 KHYPELeg                   26        6918        7495
 SpotStakingLeg             27        6926        7503
 PerpFundingLeg             32        7140        7775
@@ -108,7 +108,7 @@ preview methods are required by ERC-4626).
 - **`harvestFromAllLegs`** is keeper-gated and pulls realized yield from
   each leg back into vault cash.
 
-### RegimeDetector (2.7 KB bytecode)
+### RegimeDetector (2.9 KB bytecode)
 
 - Reads HyperCore market data through the `IMarketDataFeed` interface
   (the adapter for the Elysium market-data precompile — see spec §2).
@@ -156,7 +156,7 @@ mock-friendly dependency interface. See `docs/ROADMAP.md §5` for the
 |---|---:|---:|---|
 | YieldAggregator | 12 151 | 10 979 | Vault + keeper + timelock |
 | TradeOnlyAgent | 2 839 | 2 811 | EIP-712 delegation |
-| RegimeDetector | 2 926 | 2 650 | Market-data adapter |
+| RegimeDetector | 3 160 | 2 884 | Market-data adapter |
 | KHYPELeg | 7 899 | 7 220 | kHYPE LST leg |
 | SpotStakingLeg | 7 922 | 7 243 | Spot-staking leg |
 | PerpFundingLeg | 7 775 | 7 140 | Perp-funding leg |

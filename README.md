@@ -146,7 +146,7 @@ landed this week — see `docs/ROADMAP.md §2.1`:
 |---|---|---|
 | `src/aggregator/YieldAggregator.sol` | 10,979 | 46 |
 | `src/delegation/TradeOnlyAgent.sol` | 2,811 | 8 |
-| `src/keeper/RegimeDetector.sol` | 2,650 | 13 |
+| `src/keeper/RegimeDetector.sol` | 2,884 | 13 |
 | `src/legs/KHYPELeg.sol` | 7,220 | 28 |
 | `src/legs/SpotStakingLeg.sol` | 7,243 | 29 |
 | `src/legs/PerpFundingLeg.sol` | 9,961 | 34 |
