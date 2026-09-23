@@ -339,7 +339,9 @@ contract MockRouter is IERC20Router {
     function swapExactUSDCForToken(address, uint256 amountIn) external override returns (uint256 outAmount) {
         uint256 p = oracle.hypePriceUsdc();
         require(p > 0, "no price");
-        outAmount = (amountIn * 1_000_000_000_000_000_000) / p;
+        // amountIn is 6-dec USDC, p is 6-dec USDC/HYPE, outAmount is 18-dec HYPE.
+        //   outAmount = (amountIn * 1e12) / p
+        outAmount = (amountIn * 1_000_000_000_000) / p;
         require(hype.balanceOf(address(this)) >= outAmount, "no hype out");
         hype.transfer(msg.sender, outAmount);
     }
@@ -352,7 +354,7 @@ contract MockRouter is IERC20Router {
         usdc.mint(msg.sender, outAmount);
     }
     function getAmountOut(address, address, uint256 amountIn) external view override returns (uint256) {
-        return (amountIn * 1_000_000_000_000_000_000) / oracle.hypePriceUsdc();
+        return (amountIn * 1_000_000_000_000) / oracle.hypePriceUsdc();
     }
 }
 
