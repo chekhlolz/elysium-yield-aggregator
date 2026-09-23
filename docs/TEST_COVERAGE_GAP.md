@@ -469,42 +469,77 @@ request.**
   `notional == N`. Verify that `_zeroSig()` is what is passed — the M2
   blocker per KI-2. This test documents *that* KI-2 is real.
 
+**End-to-end deploy against a real EVM (round-8 addition).**
+
+- [x] `solidity/tests/test_deploy_anvil.py::TestRealAnvil` now spins
+  up a real Anvil subprocess (skipif if the binary is not on PATH) and
+  runs `deploy.py` against it end-to-end. Four tests cover:
+  `subprocessSpawnsAndServesRpc` (Anvil comes up, `eth_chainId` works),
+  `deployThreeContracts` (all three contracts deploy, manifest has 3
+  entries with non-zero gas used and block numbers), `happyPath`
+  (deploy + read back `asset()`/`keeper()`/`timelockSeconds()` via
+  `eth_call` to ground-truth `_encode_constructor`), and
+  `refusalGuardStillApplies` (chainId=999 is still refused even when a
+  real Anvil subprocess is available).
+  Two real bugs were found and fixed in `solidity/scripts/deploy.py`
+  as a result of running this integration:
+  the 2M gas-limit default was too tight for the ~12 KB aggregator
+  initcode (raised to 4M), and the Anvil 1.8.3 default address
+  mismatch was fixed by passing `--fund-accounts` on the Anvil
+  command line. The existing mock-RPC fallback path is unchanged.
+
 ---
 
 ## 6. Fuzz targets
 
 Pure or nearly-pure functions worth fuzzing (no state dependency, or
-state that can be set up once):
+state that can be set up once). Coverage added in round-8 by
+`solidity/test/FuzzCoverage.t.sol` (20 fuzz tests, 256 runs each, all
+passing). Status markers below indicate which targets that file
+closes; the remaining items are still open.
 
-- **`RegimeDetector.computeRegime(int64 apySigned, uint256 volBps)`**
-  — fuzz the full priority chain across all four branches. Already has
-  a trivial fuzz test; replace with the stronger invariant listed in
-  §4.
-- **`RegimeDetector.weightsForRegime(uint8 regime)`** — fuzz that the
-  sum is always 10_000 for `regime ∈ [0..255]`.
-- **`TradeOnlyAgent._delegationHash` vs `_delegationKey`** — fuzz that
-  two different `Delegation` structs always produce different keys
-  (uniqueness under `nonce`, `salt`, and `assetIds`).
-- **`TradeOnlyAgent.isValidDelegation`** — fuzz across `(maxNotional,
+- [x] **`RegimeDetector.computeRegime(int64 apySigned, uint256 volBps)`**
+  — fuzz the full priority chain across all four branches. Closed by
+  `testFuzz_computeRegime_priorityChain` and
+  `testFuzz_computeRegime_customThresholds`. The stronger invariant
+  from §4 is still open.
+- [x] **`RegimeDetector.weightsForRegime(uint8 regime)`** — fuzz that
+  the sum is always 10_000 for `regime ∈ [0..255]`. Closed by
+  `testFuzz_weightsForRegime_all256` (exhaustive over `uint8`) and
+  `testFuzz_weightsForRegime_canonical`.
+- [ ] **`TradeOnlyAgent._delegationHash` vs `_delegationKey`** — fuzz
+  that two different `Delegation` structs always produce different
+  keys (uniqueness under `nonce`, `salt`, and `assetIds`).
+- [x] **`TradeOnlyAgent.isValidDelegation`** — fuzz across `(maxNotional,
   maxPerOrder, expiresAt, nonce, salt)`; assert false when any field
   is zero (the field-guard tests cover the single-zero cases but not
-  combinations).
-- **`YieldAggregator.convertToShares` / `convertToAssets`** — fuzz
+  combinations). Closed by `testFuzz_isValidDelegation_fieldZeroGuards`,
+  `_zeroKeeperRejected`, `_wrongSignerRejected`, and `_validCaps`.
+- [x] **`YieldAggregator.convertToShares` / `convertToAssets`** — fuzz
   against the exchange-rate relationship: `convertToShares(convertToAssets(x))
-  ≈ x` within rounding. This would catch the `mint`/`redeem` accounting
-  bugs from §3 items 2–3.
-- **`YieldAggregator._distribute` via a fuzzed weight vector** — fuzz
+  ≈ x` within rounding. Closed by `testFuzz_bootstrapRoundTrip_exact`,
+  `testFuzz_multiDepositor_roundTrip`, `testFuzz_highExchangeRate_roundTrip`,
+  and `testFuzz_singlePostDeposit_roundTrip` (covers the 1:1 bootstrap
+  phase and the post-deposit phase at higher exchange rates). Catches
+  the `mint`/`redeem` accounting bugs from §3 items 2–3.
+- [ ] **`YieldAggregator._distribute` via a fuzzed weight vector** — fuzz
   `(w0, w1, w2, w3)` subject to `sum == 10000`; assert that
   `_allocatedTotal == totalAssets() - vault_cash` after each deposit.
-- **`BasisHedgeLeg.allocateTo(uint256 amount)`** — fuzz `amount ∈ [0..1e18]`;
+- [ ] **`BasisHedgeLeg.allocateTo(uint256 amount)`** — fuzz `amount ∈ [0..1e18]`;
   assert that `allocatedUsd == amount` for `amount ≥ 2` and reverts
   for `amount < 2`. Currently only tested at `amount = 1` and `amount = 0`.
-- **`TradeOnlyAgent.recordExecution(uint256 notional)`** — fuzz
-  `notional ∈ [0..maxNotional]`; assert monotone `usedNotional`.
-- **Non-canonical signatures in `_recover`** — fuzz `v ∈ [27..30]`,
+- [x] **`TradeOnlyAgent.recordExecution(uint256 notional)`** — fuzz
+  `notional ∈ [0..maxNotional]`; assert monotone `usedNotional`. Closed
+  by `testFuzz_recordExecution_monotoneWithinCap`,
+  `testFuzz_recordExecution_multiCallMonotone`, and
+  `testFuzz_recordExecution_perVenueIsolation`.
+- [x] **Non-canonical signatures in `_recover`** — fuzz `v ∈ [27..30]`,
   `r` and `s` in various ranges including 0 and `2^255`. Assert that
   `isValidDelegation` returns false for anything that does not recover
-  to `from`.
+  to `from`. Closed by `testFuzz_signatureRecovery_neverPanics` (raw
+  `ecrecover` never panics on any `(v, r, s)`), `testFuzz_signatureRecovery_zeroRS`,
+  `testFuzz_signatureRecovery_maxRS`, `testFuzz_signatureRecovery_vOutOfRange`,
+  and `testFuzz_signatureRecovery_validSignatureAccepts`.
 
 ---
 

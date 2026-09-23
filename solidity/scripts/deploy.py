@@ -410,21 +410,129 @@ def _secp256k1_address_bytes(pk) -> bytes:
 # --------------------------------------------------------------------------- #
 # Deploy helpers                                                              #
 # --------------------------------------------------------------------------- #
+def _pad32(val: int) -> bytes:
+    """Big-endian 32-byte word for an integer. Used for manual ABI encoding."""
+    return val.to_bytes(32, "big")
+
+
 def _encode_constructor(bytecode_hex: str, abi: list, args: tuple) -> str:
     """Encode the constructor args + append to creation bytecode.
 
-    We handle the aggregator's specific signature manually since we
-    don't require web3 for dry-runs:
-        (address asset, address keeper, address[4] legs, uint32 timelock, uint16[4] weights)
+    Handles three shapes:
+
+    * **YieldAggregator** (5 args)::
+
+        (address asset, address keeper, IYieldLeg[4] legs,
+         uint32 timelock, uint16[4] weights)
+
+    * **RegimeDetector** (1 arg)::
+
+        (address marketDataFeed)
+
+    * **no-arg** constructors (``args is None`` or ``args == ()``) use
+      the raw creation bytecode as-is.
+
+    Round-8 fix — caught by the new real-Anvil integration test.
+    Previously ``None`` and ``()`` were treated identically and both
+    short-circuited to "no constructor args", so a contract with a
+    real single-address constructor (RegimeDetector) would deploy
+    the raw creation bytecode without ever feeding the marketDataFeed
+    to the constructor. On a real EVM the constructor then sees
+    ``address(0)`` and reverts with ``"zero feed"``. The mock
+    provider path never executed the constructor so it passed
+    silently — exactly the class of bug real-Anvil catches.
+
+    Also: the aggregator's ``IYieldLeg[4]`` parameter is an
+    interface type, but eth_abi encodes ``address[4]`` in the
+    right-aligned (standard ABI) form — same wire format. Using the
+    ``address[4]`` signature (instead of ``bytes32[4]``) is the
+    correct encoding for fixed-length address-like arrays.
     """
+    if args is None or args == ():
+        return "0x" + bytecode_hex
+    if len(args) == 1:
+        # Single-address constructor (RegimeDetector).
+        feed = args[0]
+        if isinstance(feed, int):
+            return "0x" + bytecode_hex + _pad32(feed).hex()
+        if isinstance(feed, (bytes, bytearray)):
+            return "0x" + bytecode_hex + (b"\x00" * 12 + bytes(feed)[-20:]).hex()
+        s = str(feed).lower()
+        if s.startswith("0x"):
+            s = s[2:]
+        s = s.zfill(40)
+        return "0x" + bytecode_hex + (b"\x00" * 12 + bytes.fromhex(s)).hex()
     if len(args) != 5:
-        raise ValueError(f"aggregator constructor expects 5 args, got {len(args)}")
+        raise ValueError(
+            f"constructor expects 0, 1, or 5 args, got {len(args)}"
+        )
     asset, keeper, legs, timelock, weights = args
-    from eth_abi import encode as enc
-    payload = enc(
-        ["address", "address", "address[4]", "uint32", "uint16[4]"],
-        [asset, keeper, list(legs), int(timelock), [int(w) for w in weights]],
-    )
+
+    def _addr_hex(v) -> str:
+        """Return a 0x-prefixed 40-hex-char address from int/str/bytes."""
+        if isinstance(v, int):
+            return "0x" + f"{v:040x}"
+        if isinstance(v, (bytes, bytearray)):
+            return "0x" + bytes(v)[-20:].hex()
+        s = str(v).lower()
+        if s.startswith("0x"):
+            s = s[2:]
+        return "0x" + s.zfill(40)
+
+    # Note on eth_abi: for the 5-arg tuple
+    #   ["address", "address", "address[4]", "uint32", "uint16[4]"]
+    # eth_abi 6.x flattens the two fixed-length arrays inline in source
+    # order (no length words, no offset pointers) — this is correct ABI
+    # for a tuple of statically-sized types. We hand-roll the encoding
+    # anyway (1) to keep the dependency optional for the mock-provider
+    # path, and (2) to document the exact word layout in comments below,
+    # which is the surface area that the real-Anvil integration test
+    # exercises. The layout here MUST match what eth_abi produces,
+    # otherwise YieldAggregator's constructor decoder reverts.
+    #
+    def _addr_word_bytes(v) -> bytes:
+        s = _addr_hex(v)
+        return b"\x00" * 12 + bytes.fromhex(s[2:])
+
+    def _u32(v) -> bytes:
+        return int(v).to_bytes(32, "big")
+
+    def _u16(v) -> bytes:
+        return int(v).to_bytes(32, "big")
+
+    payload = b""
+    #
+    # ABI packing order for a tuple of statically-sized types:
+    #   concat(encode(s_1), encode(s_2), ..., encode(s_n))
+    #
+    # Each fixed-length array of static types is flattened to N
+    # contiguous 32-byte words. The constructor signature is:
+    #   (asset, keeper, legs[4], timelock, weights[4])
+    # so the wire format is:
+    #   word[0]:   asset
+    #   word[1]:   keeper
+    #   word[2]:   legs[0]
+    #   word[3]:   legs[1]
+    #   word[4]:   legs[2]
+    #   word[5]:   legs[3]
+    #   word[6]:   timelock
+    #   word[7]:   weights[0]
+    #   word[8]:   weights[1]
+    #   word[9]:   weights[2]
+    #   word[10]:  weights[3]
+    #
+    # This matches what eth_abi produces for the signature
+    # ["address", "address", "address[4]", "uint32", "uint16[4]"],
+    # which is also what the Solidity constructor decoder expects.
+    #
+    payload += _addr_word_bytes(asset)              # [asset]
+    payload += _addr_word_bytes(keeper)             # [keeper]
+    for leg in legs:                               # [legs_0..3]
+        payload += _addr_word_bytes(leg)
+    payload += _u32(timelock)                       # [timelock]
+    for w in weights:                              # [weights_0..3]
+        payload += _u16(w)
+
     return "0x" + bytecode_hex + payload.hex()
 
 
@@ -432,16 +540,23 @@ def _deploy(provider, name: str, abi: list, bytecode_hex: str,
             constructor_args, dry_run: bool, *, chain_id: int,
             gas_price: int, nonce: int, signer_address: str,
             private_key: str, receipt_timeout: float,
-            gas_limit: int = 2_000_000) -> dict:
+            gas_limit: int = 4_000_000) -> dict:
     """Deploy a single contract via the native EthProvider.
 
     ``data`` is the full creation code (bytecode + encoded constructor args).
     No estimateGas: on failure we abort rather than guess, since a mis-estimated
     gas limit would either revert or stall forever. ``gas_limit`` defaults to
-    2M which covers the aggregator's ~13 KB creation data comfortably.
+    4M. The earlier 2M default was too tight: ``eth_estimateGas`` reports the
+    YieldAggregator constructor needs ~2.6M gas (mostly the 12 KB initcode
+    deposit at 200 g/word plus the four-iter leg-validity loop), so 2M caused
+    a silent "out of gas" revert against a real Anvil. 4M gives comfortable
+    headroom without bloating the tx envelope.
     """
-    data_bytes = _encode_constructor(bytecode_hex, abi, constructor_args) if constructor_args \
+    data_bytes = (
+        _encode_constructor(bytecode_hex, abi, constructor_args)
+        if constructor_args is not None
         else bytes.fromhex(bytecode_hex)
+    )
     if isinstance(data_bytes, str):
         # _encode_constructor returns a "0x..." hex string; convert to bytes
         # so bytes(data) below doesn't raise "string argument without an encoding".
@@ -503,7 +618,7 @@ def _deploy_web3(web3, name: str, abi: list, bytecode_hex: str,
     if not dry_run:
         from web3 import Web3  # noqa: F401  (import check; real provider)
 
-    if constructor_args:
+    if constructor_args is not None:
         data = _encode_constructor(bytecode_hex, abi, constructor_args)
     else:
         data = "0x" + bytecode_hex
@@ -588,6 +703,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--yes-i-mean-it", action="store_true",
                     help="required for any non-testnet (mainnet) deploy; "
                          "must be paired with an explicit --chain-id")
+    ap.add_argument("--market-data-feed",
+                    default="0x0000000000000000000000000000000000000000",
+                    help="market data feed address for RegimeDetector "
+                         "(must be non-zero; the constructor reverts otherwise)")
     ap.add_argument("--asset", default="0x0000000000000000000000000000000000000000",
                     help="ERC-20 asset address for the aggregator")
     ap.add_argument("--keeper", default="0x0000000000000000000000000000000000000000",
@@ -717,7 +836,8 @@ def main(argv: Optional[list] = None, provider=None) -> int:
         deploys = []
         deploys.append(_deploy(ethp, "RegimeDetector",
                                *_COMPILE_CACHE["RegimeDetector"],
-                               constructor_args=None, dry_run=args.dry_run,
+                               constructor_args=(args.market_data_feed,),
+                               dry_run=args.dry_run,
                                chain_id=chain_id, gas_price=gas_price,
                                nonce=nonce, signer_address=signer_address,
                                private_key=private_key,
@@ -726,7 +846,8 @@ def main(argv: Optional[list] = None, provider=None) -> int:
             nonce += 1
         deploys.append(_deploy(ethp, "TradeOnlyAgent",
                                *_COMPILE_CACHE["TradeOnlyAgent"],
-                               constructor_args=None, dry_run=args.dry_run,
+                               constructor_args=(),
+                               dry_run=args.dry_run,
                                chain_id=chain_id, gas_price=gas_price,
                                nonce=nonce, signer_address=signer_address,
                                private_key=private_key,
@@ -747,10 +868,12 @@ def main(argv: Optional[list] = None, provider=None) -> int:
         deploys = []
         deploys.append(_deploy_web3(web3, "RegimeDetector",
                                     *_COMPILE_CACHE["RegimeDetector"],
-                                    constructor_args=None, dry_run=args.dry_run))
+                                    constructor_args=(args.market_data_feed,),
+                                    dry_run=args.dry_run))
         deploys.append(_deploy_web3(web3, "TradeOnlyAgent",
                                     *_COMPILE_CACHE["TradeOnlyAgent"],
-                                    constructor_args=None, dry_run=args.dry_run))
+                                    constructor_args=(),
+                                    dry_run=args.dry_run))
         deploys.append(_deploy_web3(web3, "YieldAggregator",
                                     *_COMPILE_CACHE["YieldAggregator"],
                                     constructor_args=(args.asset, args.keeper,
