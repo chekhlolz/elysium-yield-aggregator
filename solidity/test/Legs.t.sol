@@ -283,4 +283,248 @@ contract LegsTest is Test {
 // the boundary). Both stake legs must reconcile USDC <-> HYPE
 // explicitly on every mutation; khypeBalance is tracked in HYPE
 // units (18 dec), and pool.unstake must receive a stake-token
-// amount derived via the live pool.exchangeRate(), never a raw
+# amount derived via the live pool.exchangeRate(), never a raw
+# USDC amount.
+// ==================================================================
+
+// ---- Mocks ----
+
+contract MockUSDC is IERC20Minimal {
+    mapping(address => uint256) public override balanceOf;
+    mapping(address => mapping(address => uint256)) public override allowance;
+    uint256 public totalSupply;
+    function mint(address to, uint256 v) external { balanceOf[to] += v; totalSupply += v; }
+    function approve(address to, uint256 v) external override returns (bool) {
+        allowance[msg.sender][to] = v; return true;
+    }
+    function transfer(address to, uint256 v) external override returns (bool) {
+        require(balanceOf[msg.sender] >= v, "bal");
+        balanceOf[msg.sender] -= v; balanceOf[to] += v; return true;
+    }
+    function transferFrom(address from, address to, uint256 v) external override returns (bool) {
+        require(balanceOf[from] >= v, "bal");
+        uint256 allowed = allowance[from][msg.sender];
+        if (allowed != type(uint256).max) {
+            require(allowed >= v, "allow");
+            allowance[from][msg.sender] = allowed - v;
+        }
+        balanceOf[from] -= v; balanceOf[to] += v; return true;
+    }
+}
+
+contract MockHYPE is MockUSDC {}
+
+contract MockPriceOracle is IPriceOracle {
+    uint256 public hypePriceUsdc;
+    uint256 public hypeApyBps = 1000;
+    constructor(uint256 _p) { hypePriceUsdc = _p; }
+    function setPrice(uint256 _p) external { hypePriceUsdc = _p; }
+    function priceOf(string calldata t) external view override returns (uint256) {
+        return keccak256(abi.encodePacked(t)) ==
+                   keccak256(abi.encodePacked("HYPE"))
+                ? hypePriceUsdc : 1_000_000;
+    }
+    function getApy(string calldata) external view override returns (uint256) {
+        return hypeApyBps;
+    }
+}
+
+contract MockRouter is IERC20Router {
+    MockUSDC public usdc;
+    MockHYPE public hype;
+    MockPriceOracle public oracle;
+    constructor(MockUSDC _usdc, MockHYPE _hype, MockPriceOracle _oracle) {
+        usdc = _usdc; hype = _hype; oracle = _oracle;
+    }
+    function swapExactUSDCForToken(address, uint256 amountIn) external override returns (uint256 outAmount) {
+        uint256 p = oracle.hypePriceUsdc();
+        require(p > 0, "no price");
+        outAmount = (amountIn * 1e18) / p;
+        require(hype.balanceOf(address(this)) >= outAmount, "no hype out");
+        hype.transfer(msg.sender, outAmount);
+    }
+    function swapExactTokenForUSDC(address, uint256 hypeIn) external override returns (uint256 outAmount) {
+        uint256 p = oracle.hypePriceUsdc();
+        require(p > 0, "no price");
+        outAmount = (hypeIn * p) / 1e18;
+        require(hype.balanceOf(msg.sender) >= hypeIn, "no hype in");
+        hype.transferFrom(msg.sender, address(this), hypeIn);
+        usdc.mint(msg.sender, outAmount);
+    }
+    function getAmountOut(address, address, uint256 amountIn) external view override returns (uint256) {
+        return (amountIn * 1e18) / oracle.hypePriceUsdc();
+    }
+}
+
+contract MockStakingPool is IStakingPool {
+    uint256 public constant RATE_18 = 1e18;
+    mapping(address => uint256) public staked;
+    MockHYPE public hype;
+    constructor(MockHYPE _hype) { hype = _hype; }
+    function exchangeRate() external view override returns (uint256) { return RATE_18; }
+    function unbondingPeriod() external view override returns (uint256) { return 0; }
+    function stake(address, uint256 amount) external override {
+        require(hype.balanceOf(msg.sender) >= amount, "no hype");
+        hype.transferFrom(msg.sender, address(this), amount);
+        staked[msg.sender] += amount;
+        emit Staked(msg.sender, amount);
+    }
+    function unstake(address stakeToken, uint256 amount) external override {
+        require(staked[stakeToken] >= amount, "no stake tokens");
+        staked[stakeToken] -= amount;
+        emit Unstaked(stakeToken, amount, 0);
+    }
+    function creditUnbonded(address stakeToken, uint256 amount, address to) external override returns (uint256) {
+        require(hype.balanceOf(address(this)) >= amount, "no hype in pool");
+        hype.transfer(to, amount);
+        emit Unbonded(to, amount);
+        return amount;
+    }
+    function balanceOf(address stakeToken, address account) external view override returns (uint256) {
+        return staked[account];
+    }
+}
+
+contract KI1ReconcileTest is Test {
+    address constant OWNER = address(0x1111);
+
+    MockUSDC usdc;
+    MockHYPE hype;
+    MockPriceOracle oracle;
+    MockRouter router;
+    MockStakingPool pool;
+
+    uint256 constant PRICE_200 = 2_000_000;
+    uint256 constant PRICE_250 = 2_500_000;
+    uint256 constant USD_1000 = 1_000_000 * 1_000;
+    uint256 constant USD_500 = 500_000 * 1_000;
+
+    function setUp() public {
+        usdc   = new MockUSDC();
+        hype   = new MockHYPE();
+        oracle = new MockPriceOracle(PRICE_200);
+        router = new MockRouter(usdc, hype, oracle);
+        pool   = new MockStakingPool(hype);
+        hype.mint(address(router), 1_000_000 * 1e18);
+        usdc.mint(OWNER, 1_000_000 * 1_000 * 1_000);
+    }
+
+    function _deployKHYPE() internal returns (KHYPELeg) {
+        vm.startPrank(OWNER);
+        KHYPELeg leg = new KHYPELeg(address(usdc), address(hype),
+                                     address(router), address(pool),
+                                     address(oracle), 1000);
+        usdc.approve(address(router), type(uint256).max);
+        vm.stopPrank();
+        return leg;
+    }
+
+    function _deploySpot() internal returns (SpotStakingLeg) {
+        vm.startPrank(OWNER);
+        SpotStakingLeg leg = new SpotStakingLeg(address(usdc), address(hype),
+                                                 address(router), address(pool),
+                                                 address(oracle), 1000);
+        usdc.approve(address(router), type(uint256).max);
+        vm.stopPrank();
+        return leg;
+    }
+
+    function test_KI1_KHYPELeg_allocate_atFixedPrice() public {
+        KHYPELeg leg = _deployKHYPE();
+        vm.startPrank(OWNER);
+        uint256 returned = leg.allocateTo(USD_1000);
+        vm.stopPrank();
+        assertEq(returned, USD_1000, "allocateTo returned");
+        assertEq(leg.khypeBalance(), 500 * 1e18, "khypeBalance in HYPE units");
+        assertEq(leg.allocatedUsd(), USD_1000, "allocatedUsd ledger");
+        assertEq(leg.currentValue(), USD_1000, "currentValue at fixed price");
+    }
+
+    function test_KI1_KHYPELeg_reduce_from_unstakes_correct_token_amount() public {
+        KHYPELeg leg = _deployKHYPE();
+        vm.startPrank(OWNER);
+        leg.allocateTo(USD_1000);
+        vm.stopPrank();
+        uint256 beforeUnstaked = pool.staked(address(leg));
+        assertEq(beforeUnstaked, 500 * 1e18, "pool staked after allocate");
+        vm.startPrank(OWNER);
+        uint256 returned = leg.reduceFrom(USD_500);
+        vm.stopPrank();
+        assertEq(beforeUnstaked - pool.staked(address(leg)), 250 * 1e18,
+                 "pool unstaked the right stake-token amount");
+        assertEq(returned, USD_500, "USDC returned to owner");
+        assertEq(leg.allocatedUsd(), USD_500, "allocatedUsd dropped by reduce");
+        assertEq(leg.khypeBalance(), 250 * 1e18, "khypeBalance in HYPE units");
+    }
+
+    function test_KI1_KHYPELeg_currentValue_re_rates_after_oracle_repricing() public {
+        KHYPELeg leg = _deployKHYPE();
+        vm.startPrank(OWNER);
+        leg.allocateTo(USD_1000);
+        vm.stopPrank();
+        assertEq(leg.khypeBalance(), 500 * 1e18, "khypeBalance after allocate");
+        assertEq(leg.currentValue(), USD_1000, "currentValue at $2.00");
+        oracle.setPrice(PRICE_250);
+        assertEq(leg.khypeBalance(), 500 * 1e18, "khypeBalance unchanged on price drift");
+        assertEq(leg.currentValue(), 1_250_000_000, "currentValue at $2.50 = 500 * 2.50");
+        vm.startPrank(OWNER);
+        uint256 returned = leg.reduceFrom(USD_500);
+        vm.stopPrank();
+        assertEq(returned, USD_500, "returned at new price");
+        assertEq(leg.khypeBalance(), 300 * 1e18, "residual khypeBalance in HYPE units");
+        assertEq(leg.currentValue(), 750_000_000, "currentValue = 300 HYPE @ $2.50");
+    }
+
+    function test_KI1_KHYPELeg_reduce_no_USDC_subtracted_from_HYPE_counter() public {
+        KHYPELeg leg = _deployKHYPE();
+        vm.startPrank(OWNER);
+        leg.allocateTo(USD_1000);
+        vm.stopPrank();
+        assertEq(leg.khypeBalance(), 500 * 1e18);
+        vm.startPrank(OWNER);
+        leg.reduceFrom(USD_500);
+        vm.stopPrank();
+        assertEq(leg.khypeBalance(), 250 * 1e18,
+                 "khypeBalance dropped by the HYPE equivalent, not the raw USDC");
+    }
+
+    function test_KI1_SpotStakingLeg_allocate_atFixedPrice() public {
+        SpotStakingLeg leg = _deploySpot();
+        vm.startPrank(OWNER);
+        uint256 returned = leg.allocateTo(USD_1000);
+        vm.stopPrank();
+        assertEq(returned, USD_1000);
+        assertEq(leg.rewardHypeBalance(), 500 * 1e18, "rewardHypeBalance in HYPE units");
+        assertEq(leg.allocatedUsd(), USD_1000);
+        assertEq(leg.currentValue(), USD_1000);
+    }
+
+    function test_KI1_SpotStakingLeg_reduce_unstakes_correct_amount() public {
+        SpotStakingLeg leg = _deploySpot();
+        vm.startPrank(OWNER);
+        leg.allocateTo(USD_1000);
+        vm.stopPrank();
+        uint256 before = pool.staked(address(leg));
+        assertEq(before, 500 * 1e18);
+        vm.startPrank(OWNER);
+        uint256 returned = leg.reduceFrom(USD_500);
+        vm.stopPrank();
+        assertEq(before - pool.staked(address(leg)), 250 * 1e18,
+                 "unstaked the right stake-token amount");
+        assertEq(returned, USD_500);
+        assertEq(leg.rewardHypeBalance(), 250 * 1e18, "rewardHypeBalance in HYPE units");
+        assertEq(leg.allocatedUsd(), USD_500);
+    }
+
+    function test_KI1_SpotStakingLeg_currentValue_re_rates_on_oracle_drift() public {
+        SpotStakingLeg leg = _deploySpot();
+        vm.startPrank(OWNER);
+        leg.allocateTo(USD_1000);
+        vm.stopPrank();
+        assertEq(leg.rewardHypeBalance(), 500 * 1e18);
+        assertEq(leg.currentValue(), USD_1000);
+        oracle.setPrice(PRICE_250);
+        assertEq(leg.rewardHypeBalance(), 500 * 1e18);
+        assertEq(leg.currentValue(), 1_250_000_000, "currentValue at $2.50");
+    }
+}

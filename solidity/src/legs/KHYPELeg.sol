@@ -108,33 +108,45 @@ contract KHYPELeg is IYieldLeg {
         for (uint256 i = 0; i < n; i++) out[i] = history[i].apyBps;
     }
 
-    /** khypeBalance * exchangeRate * price(HYPE) + USDC balance. */
+    /**
+     * KI-1 (Option A, DESIGN_KI1_UNIT_RECONCILE): khypeBalance is now
+     * tracked in HYPE units (18 dec) -- the pool.exchangeRate() factor
+     * is folded in at the boundary (allocateTo), so the valuation
+     * math collapses to `hype * price`.
+     */
     function currentValue() external view returns (uint256) {
         uint256 v = 0;
         if (khypeBalance > 0) {
-            uint256 rate = pool.exchangeRate();
-            uint256 hypeEq = (khypeBalance * rate) / 1e18;
             uint256 price = _hypePriceUsdc();
-            v = (hypeEq * price) / 1e6;
+            v = (khypeBalance * price) / 1e6;
         }
         v += usdc.balanceOf(address(this));
         return v;
     }
 
-    function allocateTo(uint256 amount) external nonReentrant returns (uint256) {
+    function allocateTo(uint256 usdAmount) external nonReentrant returns (uint256) {
         require(msg.sender == owner, "not owner");
-        require(amount > 0, "zero");
+        require(usdAmount > 0, "zero");
 
-        uint256 hypeIn = router.swapExactUSDCForToken(address(hype), amount);
+        // KI-1 (Option A): convert USDC -> HYPE at the live oracle
+        // price, and track the HYPE-equivalent for the on-book balance.
+        // currentValue() then collapses to `khypeBalance * price`.
+        uint256 price = _hypePriceUsdc();
+        require(price > 0, "no oracle price");
+        uint256 hypeEquivalent = (usdAmount * 1e18) / price;
+
+        uint256 hypeIn = router.swapExactUSDCForToken(address(hype), usdAmount);
+        require(hypeIn > 0, "router returned 0");
+
         hype.safeApprove(address(pool), hypeIn);
         pool.stake(address(hype), hypeIn);
 
-        khypeBalance += pool.balanceOf(address(this), address(this));
-        allocatedUsd += amount;
+        khypeBalance += hypeEquivalent;
+        allocatedUsd += usdAmount;
 
         _recordApy(expectedApy());
-        emit Allocated(amount, allocatedUsd);
-        return amount;
+        emit Allocated(usdAmount, allocatedUsd);
+        return usdAmount;
     }
 
     /** kHYPE accrues through exchange rate — no claim(); only USDC sweep. */
@@ -149,16 +161,32 @@ contract KHYPELeg is IYieldLeg {
         _recordApy(expectedApy());
     }
 
-    function reduceFrom(uint256 amount) external nonReentrant returns (uint256 returnedUsd) {
+    function reduceFrom(uint256 usdAmount) external nonReentrant returns (uint256 returnedUsd) {
         require(msg.sender == owner, "not owner");
-        require(amount > 0 && khypeBalance >= amount, "bad amount");
 
-        khypeBalance -= amount;
-        pool.unstake(address(this), amount);
+        // KI-1 (Option A): convert USDC -> HYPE at the live oracle
+        // price, then convert HYPE -> stake tokens via the pool's
+        // current exchangeRate(). Call pool.unstake with the stake-
+        // token amount -- never with the raw USDC amount.
+        require(usdAmount > 0, "bad amount");
+        uint256 price = _hypePriceUsdc();
+        require(price > 0, "no oracle price");
+        uint256 hypeAmount = (usdAmount * 1e18) / price;
+        require(khypeBalance >= hypeAmount, "bad amount");
+
+        khypeBalance -= hypeAmount;
+
+        // Convert HYPE amount to stake tokens via the live pool rate.
+        uint256 rate = pool.exchangeRate();
+        require(rate > 0, "pool rate is 0");
+        uint256 stakeTokenAmount = (hypeAmount * rate) / 1e18;
+        require(stakeTokenAmount > 0, "zero stake amount");
+
+        pool.unstake(address(this), stakeTokenAmount);
 
         uint256 period = pool.unbondingPeriod();
         if (period == 0) {
-            uint256 hypeOut = pool.creditUnbonded(address(this), amount, address(this));
+            uint256 hypeOut = pool.creditUnbonded(address(this), stakeTokenAmount, address(this));
             if (hypeOut > 0) {
                 hype.safeApprove(address(router), hypeOut);
                 uint256 u = router.swapExactTokenForUSDC(address(hype), hypeOut);
@@ -167,8 +195,11 @@ contract KHYPELeg is IYieldLeg {
             }
         }
 
-        if (allocatedUsd >= amount) allocatedUsd -= amount; else allocatedUsd = 0;
-        emit Reduced(amount, allocatedUsd);
+        allocatedUsd = usdAmount <= allocatedUsd
+            ? allocatedUsd - usdAmount
+            : 0;
+
+        emit Reduced(usdAmount, allocatedUsd);
     }
 
     // ---- Owner helpers ----
