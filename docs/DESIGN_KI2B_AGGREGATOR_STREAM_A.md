@@ -60,9 +60,18 @@ call.) The `_fallbackSig()` symbol itself is defined twice
   delegation and route through `submitIntent`. Replace
   `_fallbackSig()` with an aggregator-authorized signature throughout
   the leg. Remove the `_fallbackSig()` symbol entirely.
-- **Phase 3 (future)**: rename `lastDelegationNonce` →
-  `nextDelegationNonce`, delete `bumpNonce()`, add
-  `lastExecutedNonce(i)` view.
+- **Phase 3 (IMPLEMENTED in round-15a)**: rename
+  `lastDelegationNonce` → `nextDelegationNonce` (pre-increment
+  semantics — the value written into `Delegation.nonce` is the
+  pre-increment value, i.e. first call proposes nonce=0), delete
+  `bumpNonce()`, add `lastExecutedNonce(delegator, nonce)` view
+  keyed by `(delegator, nonce)`. `lastExecutedNonce` is written
+  ONLY after a successful `_writeOpen`/`_writeClose` returns inside
+  `submitIntent`/`submitIntentFromStreamA` — not from the fallback
+  `_writeOpen`/`_writeClose` path (gated by `devFallbackEnabled`,
+  uses `_fallbackSig`). See DESIGN_KI2_SUBMITINTENT.md §9 Phase 3
+  for the full rationale and `Phase3NonceCleanupTest` in
+  `solidity/test/Legs.t.sol` for coverage.
 
 Phase 2 is the gap between the current state and a testnet-deployable
 aggregator. Without it, `executePending` on a rebalance that shifts
@@ -185,7 +194,7 @@ writer call).
 
 - **Pro**: aggregator-side verification is fast-fail; a bad
   signature never touches the leg's storage (`submittedIntents`,
-  `lastDelegationNonce`), and no writer gas is burned on a doomed
+  `nextDelegationNonce`), and no writer gas is burned on a doomed
   call. Also lets the aggregator enforce a *delegator-level* cap
   aggregate (`remainingNotional` across all four legs in one view
   call) before routing to individual legs.
@@ -490,12 +499,17 @@ Both models work; the current reference test uses Model 1
 ### 4.5 Nonce management
 
 The keeper's `d.nonce` counter is off-chain, one nonce per rebalance
-epoch. The aggregator does not advance `lastDelegationNonce` (that
+epoch. The aggregator does not advance `nextDelegationNonce` (that
 field is leg-local, per `DESIGN_KI2_SUBMITINTENT.md §6`, and is
 only ever used by `_nextDelegation()` inside the leg's Phase-1
 `allocateTo` / `harvest` / `reduceFrom` paths — which are being
 removed in Phase 2 anyway). Phase 3 (see §7) cleans up the leftover
-`lastDelegationNonce` and `bumpNonce()` symbols.
+`nextDelegationNonce` storage field and removed the `bumpNonce()`
+symbol — done in round-15a. The leg-local nonce advances
+monotonically across `_nextDelegation()` calls and rolls back on
+revert (Solidity atomic semantics), so a `_nextDelegation()` call
+whose downstream writer call reverts leaves `nextDelegationNonce`
+unchanged.
 
 ---
 

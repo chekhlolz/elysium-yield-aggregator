@@ -63,8 +63,8 @@ TradeOnlyAgent              8        3103        3131
 RegimeDetector             13        2884        3160
 KHYPELeg                   28        7743        8443
 SpotStakingLeg             29        7767        8467
-PerpFundingLeg             41       13035       13818
-BasisHedgeLeg              42       13023       13759
+PerpFundingLeg             41       13149       13932
+BasisHedgeLeg              42       13137       13873
 SafeERC20                   0          85         135  (library)
 RegimeId                    0          85         135  (enum)
 IYieldAggregator           27           0           0

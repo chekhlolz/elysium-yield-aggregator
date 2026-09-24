@@ -634,9 +634,19 @@ existing `allocateTo` path is a breaking change for those tests.
    plan (Option B: off-chain keeper signs, aggregator submits; new
    `executePendingWithStreamA(Delegation, Signature)` entry point on
    the aggregator; `_fallbackSig` removed from both perp legs).
-3. **Phase 3 — cleanup**: delete `bumpNonce()`, rename
-   `lastDelegationNonce` → `nextDelegationNonce`, add
-   `lastExecutedNonce(i)` view.
+3. **Phase 3 — cleanup (IMPLEMENTED in round-15a)**: delete
+   `bumpNonce()`, rename `lastDelegationNonce` → `nextDelegationNonce`
+   (semantics flipped from post-increment to pre-increment: the
+   value written into `Delegation.nonce` is the pre-increment value,
+   i.e. the first call proposes nonce=0, the second proposes nonce=1),
+   add `lastExecutedNonce(delegator, nonce)` view. The `lastExecutedNonce`
+   mapping is keyed by `(delegator, nonce)` and is written ONLY after
+   a successful `_writeOpen`/`_writeClose` returns inside `submitIntent`
+   / `submitIntentFromStreamA` — NOT from the fallback `_writeOpen`/
+   `_writeClose` path (those are gated by `devFallbackEnabled` and use
+   `_fallbackSig`, which does not represent real venue execution).
+   Coverage: `Phase3NonceCleanupTest` sub-suite in
+   `solidity/test/Legs.t.sol` (round-15a, 10 tests).
 
 Existing allocations that were made under Phase 1 with `_zeroSig()`
 cannot be executed against a real writer — they live only in the

@@ -23,6 +23,7 @@ pragma solidity ^0.8.26;
 import "@forge-std/Test.sol";
 import "../src/aggregator/YieldAggregator.sol";
 import "../src/interfaces/IYieldLeg.sol";
+import "../src/interfaces/IElysiumCoreWriter.sol";
 import "../src/keeper/RegimeDetector.sol";
 import "../src/delegation/TradeOnlyAgent.sol";
 
@@ -1260,3 +1261,592 @@ contract FuzzFirstDepositor is Test {
         }
     }
 }
+
+// ==================================================================
+// Round-15b additions: closes the three remaining [ ] items in
+// docs/TEST_COVERAGE_GAP.md §6:
+//   1. TradeOnlyAgent._delegationHash vs _delegationKey uniqueness
+//   2. YieldAggregator._distribute via a fuzzed weight vector
+//   3. BasisHedgeLeg.allocateTo(uint256) boundary
+// ==================================================================
+
+// ---------------------------------------------------------------------------
+// Fuzz DelegationKey: _delegationHash uniqueness under nonce / salt / assetIds
+// ---------------------------------------------------------------------------
+//
+// The internal `_delegationHash(_from, d)` (TradeOnlyAgent.sol:124) computes
+// the EIP-712 digestStruct. Since it's internal, the test recomputes the
+// digest directly using `keccak256(abi.encode(...))` on the same field
+// tuple. This is equivalent to the `_delegationKey` used by the venue-side
+// `recordExecution` bookkeeping (venue/delegator/keeper/nonce) in the
+// sense that both uniquely identify a delegation: `_delegationHash` keys
+// the FULL delegation struct (which the task §6 text calls out), while
+// `_delegationKey` keys only `(venue, delegator, keeper, nonce)`. This
+// test pins the stronger property — the EIP-712 digestStruct — because
+// that is what binds the signature to the struct fields.
+//
+// The test perturbs three independent fields (nonce, salt, assetIds) in
+// turn and asserts the digest changes in each case. If any of the three
+// perturbation branches produced an EQUAL digest, that would be a real
+// bug: it would mean two structurally-different delegations produced
+// the same EIP-712 hash, allowing one signature to validate against a
+// mutated struct.
+contract FuzzDelegationKey is Test {
+    uint256 constant DELEGATOR_PK = 0xA111;
+
+    TradeOnlyAgent agent;
+
+    function setUp() public {
+        agent = new TradeOnlyAgent();
+    }
+
+    /// Pure helper: recompute `_delegationHash(_from, d)` inline.
+    /// Mirrors TradeOnlyAgent.sol:124-145 exactly.
+    function _digestStruct(address _from, ITradeOnlyAgent.Delegation memory d)
+        internal view returns (bytes32)
+    {
+        // Compute the two intermediate hashes first, then assemble —
+        // keeps the stack shallow (Solidity non-ViaIR has a 16-slot
+        // limit and 8 fields + intermediates trip it).
+        bytes32 delegationTypeHash = keccak256(
+            "Delegation(address keeper,uint256[] assetIds,uint256 maxNotional,uint256 maxPerOrder,uint64 expiresAt,uint64 nonce,bytes32 salt)"
+        );
+        bytes32 assetIdsHash = keccak256(abi.encode(d.assetIds));
+        bytes memory payload = abi.encode(
+            _from,
+            delegationTypeHash,
+            d.keeper,
+            assetIdsHash,
+            d.maxNotional,
+            d.maxPerOrder,
+            d.expiresAt,
+            d.nonce,
+            d.salt
+        );
+        return keccak256(payload);
+    }
+
+    /// Build a `Delegation` memory struct with the given fields.
+    /// `assetIds` is a length-1 array containing `id0` — matches the
+    /// pattern used by every other test in this file (assetIds[0] == 1
+    /// is the HYPE asset id on Elysium per `IElysiumCoreWriter` docs).
+    function _mkDelegation(address keeper, uint256 id0, uint256 maxNotional,
+                          uint256 maxPerOrder, uint64 nonce, bytes32 salt)
+        internal pure returns (ITradeOnlyAgent.Delegation memory)
+    {
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = id0;
+        return ITradeOnlyAgent.Delegation({
+            keeper:      keeper,
+            assetIds:    ids,
+            maxNotional: maxNotional,
+            maxPerOrder: maxPerOrder,
+            expiresAt:   0,
+            nonce:       nonce,
+            salt:        salt
+        });
+    }
+
+    /// Signature-replay cross-check: sign `d1` off-line and assert the
+    /// live agent's `isValidDelegation` accepts it. This pins the
+    /// EIP-712 domain separator + digest formula used by the internal
+    /// `_delegationHash` — if either drifted, the re-computed digest
+    /// here would fail validation.
+    function _crossCheckAgent(address delegator,
+                              ITradeOnlyAgent.Delegation memory d1,
+                              bytes32 hash1)
+        internal view
+    {
+        bytes32 domainTypeHash = keccak256(
+            "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+        );
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                domainTypeHash,
+                keccak256("TradeOnlyAgent v1"),
+                keccak256("1"),
+                block.chainid,
+                address(agent)
+            )
+        );
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19\x01", domainSeparator, hash1)
+        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(DELEGATOR_PK, digest);
+        assertTrue(agent.isValidDelegation(
+            delegator, d1, ITradeOnlyAgent.Signature(v, r, s)),
+            "EIP-712 digest reproduces the agent's expected value");
+    }
+
+    /// Compact field bundle so we can pass a "shape" between the fuzz
+    /// entry point and its helper calls without spilling the local
+    /// stack. Solidity's non-ViaIR stack is shallow; keeping the
+    /// working set in a struct keeps the entry point within budget.
+    struct Shape {
+        uint64   nonce;
+        bytes32  salt;
+        uint256  id0;
+        uint256  maxNotional;
+        uint256  maxPerOrder;
+        address  keeper;
+    }
+
+    /// Assert that perturbing `s.nonce` by `+1` changes the digest.
+    /// `nonce1 + 1` may overflow uint64 (Solidity 0.8.26 has
+    /// default-checked arithmetic). We clamp nonce1 in the fuzz entry
+    /// to `nonce1 < type(uint64).max - 1`, so the increment here is
+    /// always safe.
+    function _assertNonceChanges(address delegator, Shape memory s)
+        internal view
+    {
+        uint64 perturbedNonce = uint64(s.nonce) + 1;
+        bytes32 base = _digestStruct(delegator, _mkDelegation(
+            s.keeper, s.id0, s.maxNotional, s.maxPerOrder, s.nonce, s.salt));
+        bytes32 pert = _digestStruct(delegator, _mkDelegation(
+            s.keeper, s.id0, s.maxNotional, s.maxPerOrder, perturbedNonce, s.salt));
+        assertNotEq(pert, base, "nonce perturbation must change the hash");
+    }
+
+    /// Assert that XOR-perturbing `s.salt` changes the digest.
+    function _assertSaltChanges(address delegator, Shape memory s)
+        internal view
+    {
+        bytes32 base = _digestStruct(delegator, _mkDelegation(
+            s.keeper, s.id0, s.maxNotional, s.maxPerOrder, s.nonce, s.salt));
+        bytes32 pert = _digestStruct(delegator, _mkDelegation(
+            s.keeper, s.id0, s.maxNotional, s.maxPerOrder, s.nonce,
+            bytes32(uint256(s.salt) ^ 0x01010101)));
+        assertNotEq(pert, base, "salt perturbation must change the hash");
+    }
+
+    /// Assert that perturbing `s.id0` by `+1` changes the digest.
+    /// `id0 + 1` may overflow uint256 (Solidity 0.8.26 default-checked
+    /// arithmetic). We clamp id0 in the fuzz entry to
+    /// `id0 < type(uint256).max - 1`, so the increment here is safe.
+    function _assertAssetIdsChange(address delegator, Shape memory s)
+        internal view
+    {
+        uint256 perturbedId = s.id0 + 1;
+        bytes32 base = _digestStruct(delegator, _mkDelegation(
+            s.keeper, s.id0, s.maxNotional, s.maxPerOrder, s.nonce, s.salt));
+        bytes32 pert = _digestStruct(delegator, _mkDelegation(
+            s.keeper, perturbedId, s.maxNotional, s.maxPerOrder, s.nonce, s.salt));
+        assertNotEq(pert, base, "assetIds perturbation must change the hash");
+    }
+
+    /// Assert determinism: same struct → same hash.
+    function _assertDeterministic(address delegator, Shape memory s)
+        internal view
+    {
+        ITradeOnlyAgent.Delegation memory d1 = _mkDelegation(
+            s.keeper, s.id0, s.maxNotional, s.maxPerOrder, s.nonce, s.salt);
+        ITradeOnlyAgent.Delegation memory d2 = _mkDelegation(
+            s.keeper, s.id0, s.maxNotional, s.maxPerOrder, s.nonce, s.salt);
+        assertEq(_digestStruct(delegator, d1), _digestStruct(delegator, d2),
+                 "identical struct must produce identical hash (determinism)");
+    }
+
+    function testFuzz_DelegationKey_uniqueness(
+        uint64 nonce1, bytes32 salt1, uint256 id0,
+        uint256 maxNotional, uint256 maxPerOrder, address keeper
+    ) public view {
+        // Clamp nonce1 and id0 to leave headroom for the +1 perturbation
+        // (Solidity 0.8.26 has default-checked arithmetic; nonce1+1
+        // or id0+1 would otherwise panic on max values).
+        nonce1 = uint64(bound(uint256(nonce1), 0, type(uint64).max - 1));
+        id0 = bound(id0, 0, type(uint256).max - 1);
+
+        address delegator = vm.addr(DELEGATOR_PK);
+        Shape memory s = Shape({
+            nonce: nonce1, salt: salt1, id0: id0,
+            maxNotional: maxNotional, maxPerOrder: maxPerOrder, keeper: keeper
+        });
+
+        _assertNonceChanges(delegator, s);
+        _assertSaltChanges(delegator, s);
+        _assertAssetIdsChange(delegator, s);
+        _assertDeterministic(delegator, s);
+
+        // Cross-check against the live agent's EIP-712 hashing.
+        // Gated on non-zero fields because `_delegationHash` requires
+        // maxNotional and maxPerOrder to be non-zero (see the
+        // `field-zero guard` test earlier in this file).
+        if (maxNotional > 0 && maxPerOrder > 0 && keeper != address(0)) {
+            ITradeOnlyAgent.Delegation memory d1 = _mkDelegation(
+                keeper, id0, maxNotional, maxPerOrder, nonce1, salt1);
+            _crossCheckAgent(delegator, d1,
+                             _digestStruct(delegator, d1));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fuzz Distribute weight vector: _distribute accounting identity
+// ---------------------------------------------------------------------------
+//
+// Closes gap-doc §6: "fuzz (w0, w1, w2, w3) subject to sum == 10000;
+// assert that _allocatedTotal == totalAssets() - vault_cash after each
+// deposit."
+//
+// Because `_allocatedTotal` is private, we observe the equivalent
+// property through public state:
+//   sum over i of leg[i].currentValue() + vault_cash == totalAssets().
+// After a single deposit of `assets` on a freshly-constructed vault
+// (weights = fuzzed, no prior shares), this collapses to the round-
+// trip property that the deposit is fully accounted for:
+//   sum(legs) + cash  ==  assets (within dust-rounding tolerance).
+//
+// Rounding tolerance: each of the 4 legs receives `(assets * w[i]) /
+// 10000`, and integer division truncates by up to `w[i]/10000` of
+// one USDC unit. The sum of truncations is bounded above by
+//   (sum(w[i]) * 1) / 10000 * 10000 = 4 USDC units
+// in the worst case, since we have 4 truncations each ≤ 1. We use
+// a bound of 4 USDC (4e6 in 6-decimal USDC base units). This is
+// tight enough to catch a silent 100%-of-1-USDC accounting leak
+// while remaining loose enough to absorb the integer-division
+// dust.
+//
+// MockYieldLeg (defined above, shared with FuzzFirstDepositor) moves
+// the deposited USDC out of the aggregator into the leg via the
+// aggregator's `_distribute` path, so the vault-cash remainder is
+// exactly the rounding dust.
+
+contract FuzzDistributeWeights is Test {
+    address constant OWNER  = address(0x1111);
+    address constant KEEPER = address(0x2222);
+    address constant ALICE  = address(0x3333);
+
+    MockUSDC       usdc;
+    MockYieldLeg   leg0;
+    MockYieldLeg   leg1;
+    MockYieldLeg   leg2;
+    MockYieldLeg   leg3;
+    YieldAggregator agg;
+
+    function setUp() public {
+        usdc = new MockUSDC();
+
+        vm.startPrank(OWNER);
+        leg0 = new MockYieldLeg(IERC20Minimal(address(usdc)));
+        leg1 = new MockYieldLeg(IERC20Minimal(address(usdc)));
+        leg2 = new MockYieldLeg(IERC20Minimal(address(usdc)));
+        leg3 = new MockYieldLeg(IERC20Minimal(address(usdc)));
+
+        IYieldLeg[4] memory legs = [
+            IYieldLeg(address(leg0)),
+            IYieldLeg(address(leg1)),
+            IYieldLeg(address(leg2)),
+            IYieldLeg(address(leg3))
+        ];
+        // Initialize with equal weights; the actual weights are set
+        // via requestAllocation + executePending inside each test so
+        // the fuzzed weight vector is what `_distribute` uses.
+        uint16[4] memory initW = [uint16(2500), uint16(2500), uint16(2500), uint16(2500)];
+        agg = new YieldAggregator(IERC20Minimal(address(usdc)), KEEPER, legs, 60, initW);
+
+        leg0.setAggregator(address(agg));
+        leg1.setAggregator(address(agg));
+        leg2.setAggregator(address(agg));
+        leg3.setAggregator(address(agg));
+
+        usdc.mint(ALICE, 2e18);
+        vm.stopPrank();
+    }
+
+    function testFuzz_Distribute_weightVector(
+        uint256 w0, uint256 w1, uint256 w2, uint256 w3, uint256 deposit
+    ) public {
+        deposit = bound(deposit, 1, 1e18);
+
+        // ---- Normalize (w0..w3) so that sum == 10000. ----
+        // Strategy: draw each in [0, 10000], compute raw sum, scale
+        // by 10000/sum (guarding against sum == 0 by falling back to
+        // a uniform [2500, 2500, 2500, 2500] distribution), then
+        // give the residual to leg3 to close the sum exactly.
+        w0 = w0 % 10_001;
+        w1 = w1 % 10_001;
+        w2 = w2 % 10_001;
+        w3 = w3 % 10_001;
+        uint256 rawSum = w0 + w1 + w2 + w3;
+        if (rawSum == 0) {
+            w0 = 2500; w1 = 2500; w2 = 2500; w3 = 2500;
+        } else {
+            uint256 n0 = (w0 * 10_000) / rawSum;
+            uint256 n1 = (w1 * 10_000) / rawSum;
+            uint256 n2 = (w2 * 10_000) / rawSum;
+            uint256 n3 = 10_000 - n0 - n1 - n2; // may underflow if sum of first 3 > 10000
+            // Overflow protection: if the sum of the first three scaled
+            // weights already exceeds 10000 (only happens when the
+            // scaling produces a value > 10000 due to truncation
+            // rounding on very skewed inputs), clamp and re-spread.
+            if (n0 + n1 + n2 > 10_000) {
+                n0 = 3000; n1 = 3000; n2 = 3000; n3 = 1000;
+            } else {
+                w0 = n0; w1 = n1; w2 = n2; w3 = n3;
+            }
+        }
+        // Final invariant: weights sum to exactly 10_000.
+        uint256 checkSum = w0 + w1 + w2 + w3;
+        assertEq(checkSum, 10_000, "weights sum to 10000");
+
+        // ---- Apply the fuzzed weights via requestAllocation + executePending. ----
+        // The aggregator constructor takes only the initial weights; a
+        // subsequent request/execute is the only way to change them
+        // (the vault is fully permissioned through keeper governance).
+        // Since executePending with no prior allocation just distributes
+        // totalAssets() (which is 0 here) across the new weights, it's
+        // a no-op on state and simply commits the new weights.
+        uint16[4] memory newW = [uint16(w0), uint16(w1), uint16(w2), uint16(w3)];
+        vm.prank(KEEPER);
+        bytes32 pid = agg.requestAllocation(newW, "fuzz weights");
+        vm.warp(block.timestamp + 60);
+        vm.prank(KEEPER);
+        agg.executePending();
+
+        uint16[4] memory appliedW = agg.weights();
+        assertEq(uint256(appliedW[0]), w0, "w0 applied");
+        assertEq(uint256(appliedW[1]), w1, "w1 applied");
+        assertEq(uint256(appliedW[2]), w2, "w2 applied");
+        assertEq(uint256(appliedW[3]), w3, "w3 applied");
+
+        // ---- Deposit `deposit` USDC from Alice. ----
+        usdc.mint(ALICE, deposit);
+        vm.prank(ALICE);
+        usdc.approve(address(agg), type(uint256).max);
+        vm.prank(ALICE);
+        agg.deposit(deposit, ALICE);
+
+        // ---- Assert the accounting identity. ----
+        uint256 sumLegs = leg0.currentValue() + leg1.currentValue()
+                       + leg2.currentValue() + leg3.currentValue();
+        uint256 vaultCash = usdc.balanceOf(address(agg));
+        uint256 totalAssets = agg.totalAssets();
+
+        // Identity: sum(legs) + vault cash == totalAssets(). This is
+        // the aggregator's own accounting identity (see the totalAssets
+        // view function). It must hold by construction, but we assert
+        // it explicitly so a regression that changes totalAssets
+        // (e.g., adds a fee) trips the test.
+        assertEq(sumLegs + vaultCash, totalAssets,
+                 "sum(legs) + vault cash == totalAssets");
+
+        // Stronger: after a single deposit, totalAssets must equal the
+        // deposited amount exactly. Alice's USDC left her wallet in a
+        // single transferFrom; the vault must account for 100% of it
+        // via either leg allocations or free cash (rounding remainder
+        // never leaves the vault).
+        assertEq(totalAssets, deposit,
+                 "totalAssets == deposit (all-in accounting)");
+
+        // The sum of leg allocations is bounded by the deposit: each
+        // leg receives at most its fair share, so the sum is <= deposit.
+        // The vault-cash remainder is the integer-division dust and
+        // must be at most 4 USDC units (4 * 1 wei per leg = 4 wei,
+        // but the truncation error can be up to `1 USDC base unit` per
+        // leg, so we bound by 4 USDC base units for a 4-leg vault).
+        assertLe(sumLegs, deposit, "sum(legs) <= deposit");
+        assertEq(vaultCash, deposit - sumLegs,
+                 "vault cash = deposit - sum(legs)");
+        // Tolerance bound on the rounding dust. With `assets = deposit`
+        // and 4 legs each receiving `(assets * w[i]) / 10000`, the
+        // total truncation is bounded by 4 wei in the worst case
+        // (each division truncates by at most 1 wei). We use a
+        // slightly larger tolerance (4 USDC base units = 4 wei
+        // since the vault operates on 6-decimal USDC base units
+        // that map directly to wei in this mock) to absorb any
+        // off-by-one in the tolerance estimate.
+        assertLe(vaultCash, 4,
+                 "vault cash (rounding dust) is bounded by 4 base units");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fuzz BasisHedgeLeg.allocateTo boundaries
+// ---------------------------------------------------------------------------
+//
+// Closes gap-doc §6: "fuzz amount ∈ [0..1e18]; assert that
+// allocatedUsd == amount for amount >= 2 and reverts for amount < 2."
+//
+// The actual revert conditions (BasisHedgeLeg.sol:176-184):
+//   - `require(msg.sender == owner, "not owner")`  -- called as owner.
+//   - `require(amount > 0, "zero")`                -- amount == 0 -> "zero".
+//   - `require(amount >= 2, "dust")`               -- amount == 1 -> "dust".
+//
+// So the boundary is: amount == 0 -> "zero", amount == 1 -> "dust",
+// amount >= 2 -> succeeds. The existing `Legs.t.sol` tests cover the
+// two point cases (0, 1); this fuzz pins the whole [0..1e18] range.
+//
+// To make the leg deploy cleanly without a real router/writer/oracle,
+// we deploy with `router=address(0)`, `writer=address(0)`,
+// `oracle=address(0)`, `tradeOnlyAgent=<real TOA>`. With `router==0`:
+//   - `_buyHype` falls through to `hype.balanceOf(address(this))`
+//     which returns 0 (we never mint HYPE to the leg), so
+//     `spotHypeBalance` stays at 0.
+//   - The HR=1.0 split produces `spotPortion = amount/2`,
+//     `perpPortion = amount - spotPortion = amount/2`.
+//   - For `amount == 2`: perpPortion = 1. The writer call would be
+//     `writer.openPosition(..., 1, ...)`; writer is address(0) which
+//     short-circuits (no code at address 0), so the internal call is
+//     a no-op and the leg proceeds to `allocatedUsd += amount`.
+//
+// This means allocateTo(amount) for amount >= 2 always succeeds with
+// `allocatedUsd == amount` (return value), which is exactly the
+// property the §6 spec asks us to pin.
+
+// ---------------------------------------------------------------------------
+// Minimal mock HYPE token for the BasisHedgeLeg boundary fuzz below.
+// `BasisHedgeLeg._buyHype` short-circuits when `router == address(0)`,
+// but it still calls `hype.balanceOf(address(this))` in that path.
+// If `hype` is address(0), the interface call returns empty bytes, which
+// fails ABI-decoding as uint256 and reverts. We deploy a minimal mock
+// that returns 0 so `spotHypeBalance` stays at 0.
+//
+// Declared locally so we don't need to import the interfaces/IERC20.sol
+// file (which would clash with YieldAggregator.sol's local
+// `IERC20Minimal` and `SafeERC20` — both files copy the ERC-20 surface
+// for self-containment).
+// ---------------------------------------------------------------------------
+interface IMockHypeBalance {
+    function balanceOf(address) external view returns (uint256);
+}
+
+contract MockHypeBalance is IMockHypeBalance {
+    function balanceOf(address) external pure returns (uint256) { return 0; }
+}
+
+// ---------------------------------------------------------------------------
+// Minimal mock ElysiumCoreWriter for the BasisHedgeLeg boundary fuzz
+// below. With `writer == address(0)` the internal `writer.openPosition`
+// call reverts with a bare EvmError (CALL to an address with no code),
+// which trips Forge's fuzz engine as an unhandled panic. A no-op mock
+// that just accepts `openPosition` makes the boundary test clean.
+// The mock only implements the two methods the leg actually calls on
+// the `allocateTo` path; the full interface is small (IElysiumCoreWriter
+// exposes just `openPosition` and `closePosition`).
+// ---------------------------------------------------------------------------
+contract MockWriter is IElysiumCoreWriter {
+    function openPosition(
+        uint256,
+        IElysiumCoreWriter.Side,
+        uint256,
+        address,
+        ITradeOnlyAgent.Delegation calldata,
+        ITradeOnlyAgent.Signature calldata
+    ) external {}
+    function closePosition(
+        uint256,
+        IElysiumCoreWriter.Side,
+        uint256,
+        address,
+        ITradeOnlyAgent.Delegation calldata,
+        ITradeOnlyAgent.Signature calldata
+    ) external {}
+}
+
+// ---------------------------------------------------------------------------
+// Minimal BasisHedgeLeg wrapper for the boundary fuzz below. BasisHedgeLeg
+// imports `../interfaces/IERC20.sol`, which re-declares `IERC20Minimal`
+// and `SafeERC20` in the same source scope that YieldAggregator.sol
+// re-declares (both files copy the ERC-20 surface locally for
+// self-containment). Importing both triggers a "Identifier already
+// declared" error, so instead of the full contract we cast the deployed
+// real `BasisHedgeLeg` to this minimal interface to call `allocateTo`.
+// This is the same technique used in YieldAggregator.sol's `_isPerpLeg`
+// helper (a raw selector check rather than a `type(I).is(address)`).
+// ---------------------------------------------------------------------------
+interface IBasisAllocate {
+    function allocateTo(uint256) external returns (uint256);
+    function allocatedUsd() external view returns (uint256);
+    function setFixedApyBps(uint256) external;
+    function expectedApy() external view returns (uint256);
+}
+
+// ---------------------------------------------------------------------------
+// Fuzz BasisHedgeLeg.allocateTo boundaries: amount ∈ [0..1e18] USDC base
+// units (1 USDC == 1 in 6-decimal base; 1e18 units ≈ 1 million USDC).
+// ---------------------------------------------------------------------------
+//
+// Actual boundary (BasisHedgeLeg.sol:212-220):
+//   - amount == 0  → reverts with `"zero"`  (line 213)
+//   - amount == 1  → reverts with `"dust"`  (line 220, KI-3 fix)
+//   - amount >= 2  → succeeds; `allocatedUsd` increases by `amount`
+//
+// Deploying `BasisHedgeLeg` with `router=0`, `writer=0`, `oracle=0`,
+// a real `TradeOnlyAgent`, and a minimal HYPE mock that returns
+// `balanceOf == 0` short-circuits every external call:
+//   - `_buyHype` (line 560) returns `hype.balanceOf(address(this)) = 0`
+//     when router is address(0).
+//   - `_writeOpen` (line 573) calls `writer.openPosition(...)`; writer
+//     is address(0), so the CALL opcode to an empty address succeeds
+//     as a no-op (no code, no revert).
+// The HR=1.0 split produces `spotPortion = amount/2`,
+// `perpPortion = amount - spotPortion = amount/2`. For amount==2,
+// perpPortion==1, and the writer call is a no-op, so `allocatedUsd`
+// advances by the full amount.
+//
+// To deploy the real contract without importing its .sol file (which
+// collides with YieldAggregator's local IERC20Minimal), we use
+// `vm.deployCode("src/legs/BasisHedgeLeg.sol", constructorArgs)`.
+// Forge resolves the artifact against the current build cache, so the
+// compiled BasisHedgeLeg bytecode is used as-is.
+//
+contract FuzzBasisAllocateBoundaries is Test {
+    address constant OWNER  = address(0x1111);
+    address constant DELEGATOR = address(0x2222);
+
+    TradeOnlyAgent agent;
+    MockHypeBalance hype;
+    MockWriter writer;
+
+    function setUp() public {
+        agent = new TradeOnlyAgent();
+        hype = new MockHypeBalance();
+        writer = new MockWriter();
+    }
+
+    function _deployLeg(address owner) internal returns (IBasisAllocate) {
+        vm.prank(owner);
+        address leg = vm.deployCode(
+            "src/legs/BasisHedgeLeg.sol",
+            abi.encode(
+                address(0),           // usdc (unused on the allocateTo path
+                                       // when router is 0 — no ERC-20 call
+                                       // is ever made with it)
+                address(hype),        // hype (mock returns 0 so
+                                       // spotHypeBalance stays 0)
+                address(0),           // router (short-circuits _buyHype)
+                address(writer),     // writer (mock no-op so
+                                       // openPosition succeeds)
+                address(agent),       // tradeOnlyAgent (real TOA)
+                address(0),           // oracle (unused on the allocateTo path)
+                DELEGATOR,            // delegator
+                1000                  // fixedApyBps (10% — default)
+            )
+        );
+        return IBasisAllocate(leg);
+    }
+
+    function testFuzz_BasisAllocate_boundaries(uint256 amount) public {
+        amount = bound(amount, 0, 1e18);
+
+        IBasisAllocate leg = _deployLeg(OWNER);
+
+        vm.startPrank(OWNER);
+        if (amount == 0) {
+            vm.expectRevert(bytes("zero"));
+            leg.allocateTo(amount);
+        } else if (amount == 1) {
+            vm.expectRevert(bytes("dust"));
+            leg.allocateTo(amount);
+        } else {
+            // amount >= 2
+            uint256 returned = leg.allocateTo(amount);
+            assertEq(returned, amount,
+                     "allocateTo(amount) returns amount for amount >= 2");
+            assertEq(leg.allocatedUsd(), amount,
+                     "allocatedUsd == amount for amount >= 2");
+        }
+        vm.stopPrank();
+    }
+}
+

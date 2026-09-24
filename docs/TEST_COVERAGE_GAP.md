@@ -256,10 +256,12 @@ Covered: KI-3 dust guard, KI-4 `setFixedApyBps` refreshes `expectedApy`,
 - **`setOracle` / `setRouter` / `setFundingSource` / `setPool`** — these
   functions **do not exist** on any of the four legs. All external
   addresses (`oracle`, `router`, `pool`, `writer`, `tradeOnlyAgent`,
-  `fundingSource`) are `immutable`. Only `setFixedApyBps` and
-  `bumpNonce` (Perp/Basis) and `claimPending` (KHYPE/Spot) are setters.
-  The task prompt asks about `setOracle`/`setRouter`/`setFundingSource`
-  owner-gating; the actual gap is the opposite — none of them exist, and
+  `fundingSource`) are `immutable`. Only `setFixedApyBps` (all 4 legs)
+  and `claimPending` (KHYPE/Spot) are setters; `bumpNonce` on Perp/Basis
+  was REMOVED in round-15a (KI-2b Phase 3, DESIGN_KI2_SUBMITINTENT.md
+  §9 Phase 3). The task prompt asks about `setOracle`/`setRouter`/
+  `setFundingSource` owner-gating; the actual gap is the opposite — none
+  of them exist, and
   the *only* setter (`setFixedApyBps`) is covered. The absence of setters
   means a misconfiguration at deploy time is unrecoverable, which is a
   design observation rather than a test gap.
@@ -281,8 +283,10 @@ Covered: KI-3 dust guard, KI-4 `setFixedApyBps` refreshes `expectedApy`,
 - **`claimPending` on KHYPE/Spot** — no test. Called with 0, called with
   non-zero while `pool.creditUnbonded` returns 0, called with non-zero
   while it returns positive.
-- **`bumpNonce` on Perp/Basis** — no test. `lastDelegationNonce` starts
-  at some value and increments; untested both directions.
+- **`bumpNonce` on Perp/Basis** — REMOVED in round-15a (KI-2b Phase 3).
+  `nextDelegationNonce` and `lastExecutedNonce` are now covered by the
+  `Phase3NonceCleanupTest` sub-suite in `Legs.t.sol` (round-15a). See
+  DESIGN_KI2_SUBMITINTENT.md §9 Phase 3.
 - **`_zeroSig()` (KI-2)** — a `writer.openPosition(..., _zeroSig())`
   will always revert on a real `ElysiumCoreWriter`. There is no test
   that catches this on a mock writer that rejects zero signatures.
@@ -576,9 +580,20 @@ targets are closed; the remaining items are still open.
   the sum is always 10_000 for `regime ∈ [0..255]`. Closed by
   `testFuzz_weightsForRegime_all256` (exhaustive over `uint8`) and
   `testFuzz_weightsForRegime_canonical`.
-- [ ] **`TradeOnlyAgent._delegationHash` vs `_delegationKey`** — fuzz
+- [x] **`TradeOnlyAgent._delegationHash` vs `_delegationKey`** — fuzz
   that two different `Delegation` structs always produce different
-  keys (uniqueness under `nonce`, `salt`, and `assetIds`).
+  keys (uniqueness under `nonce`, `salt`, and `assetIds`). Closed by
+  `testFuzz_DelegationKey_uniqueness` (round-15b): recomputes the
+  EIP-712 `digestStruct` inline (mirroring `TradeOnlyAgent.sol:124-145`
+  without touching the internal `_delegationHash`) and asserts
+  `hash(nonce+1) != hash(nonce)`, `hash(salt XOR 0x01010101) != hash(salt)`,
+  `hash(id0+1) != hash(id0)`, plus a determinism pin (identical struct
+  produces identical hash). Nonce/id0 are bounded to leave headroom
+  for the `+1` perturbation (Solidity 0.8.26 has checked arithmetic).
+  A live-agent cross-check signs the fuzzed delegation with
+  `vm.sign(DELEGATOR_PK, digest)` and asserts the real
+  `TradeOnlyAgent.isValidDelegation` accepts it — pinning the
+  domain-separator formula against the contract's own implementation.
 - [x] **`TradeOnlyAgent.isValidDelegation`** — fuzz across `(maxNotional,
   maxPerOrder, expiresAt, nonce, salt)`; assert false when any field
   is zero (the field-guard tests cover the single-zero cases but not
@@ -591,12 +606,31 @@ targets are closed; the remaining items are still open.
   and `testFuzz_singlePostDeposit_roundTrip` (covers the 1:1 bootstrap
   phase and the post-deposit phase at higher exchange rates). Catches
   the `mint`/`redeem` accounting bugs from §3 items 2–3.
-- [ ] **`YieldAggregator._distribute` via a fuzzed weight vector** — fuzz
+- [x] **`YieldAggregator._distribute` via a fuzzed weight vector** — fuzz
   `(w0, w1, w2, w3)` subject to `sum == 10000`; assert that
   `_allocatedTotal == totalAssets() - vault_cash` after each deposit.
-- [ ] **`BasisHedgeLeg.allocateTo(uint256 amount)`** — fuzz `amount ∈ [0..1e18]`;
+  Closed by `testFuzz_Distribute_weightVector` (round-15b): draws
+  `(w0..w3, deposit)`, normalizes the weights so `sum == 10000` exactly
+  (with an overflow-safe fallback when the raw scaling saturates),
+  applies the fuzzed weights through `requestAllocation` + `executePending`
+  (the only keeper-governance path), deposits `deposit` USDC, then
+  asserts the aggregator's own accounting identity
+  (`sum(legs.currentValue()) + usdc.balanceOf(agg) == totalAssets`)
+  plus the stronger `totalAssets == deposit` invariant — the vault
+  must account for 100% of a single deposit via legs + cash.
+- [x] **`BasisHedgeLeg.allocateTo(uint256 amount)`** — fuzz `amount ∈ [0..1e18]`;
   assert that `allocatedUsd == amount` for `amount ≥ 2` and reverts
-  for `amount < 2`. Currently only tested at `amount = 1` and `amount = 0`.
+  for `amount < 2`. Closed by `testFuzz_BasisAllocate_boundaries`
+  (round-15b). The contract is deployed through
+  `vm.deployCode("src/legs/BasisHedgeLeg.sol", constructorArgs)` with
+  a minimal `MockHypeBalance` (returns 0) for `hype`, a no-op
+  `MockWriter` for `writer`, and a real `TradeOnlyAgent` for
+  `tradeOnlyAgent`; `router = 0` short-circuits `_buyHype` so
+  `spotHypeBalance` stays at 0, and the mock writer makes the
+  `writer.openPosition` call succeed without reverting on a bare
+  EvmError. Bounded to `amount ∈ [0, 1e18]` — 1e18 USDC base units
+  is 1M USDC, well within the HYPE market's depth budget for the
+  delta-neutral hedge.
 - [x] **`TradeOnlyAgent.recordExecution(uint256 notional)`** — fuzz
   `notional ∈ [0..maxNotional]`; assert monotone `usedNotional`. Closed
   by `testFuzz_recordExecution_monotoneWithinCap`,
@@ -636,6 +670,50 @@ targets are closed; the remaining items are still open.
   combination either succeeds with a stable totalShares/totalAssets
   or reverts cleanly. Closed by `testFuzz_ZeroShare_boundaries`.
 
+**Round-15b additions — fuzz gap closure**
+(`FuzzDelegationKey`, `FuzzDistributeWeights`,
+`FuzzBasisAllocateBoundaries` contracts in `FuzzCoverage.t.sol`):
+
+- [x] **Delegation-key uniqueness across three independent
+  perturbation axes** — fuzz `(nonce1, salt1, id0, maxNotional,
+  maxPerOrder, keeper)`; assert the EIP-712 `digestStruct` differs
+  when each of `nonce`, `salt`, or `assetIds` is perturbed by
+  `+1` / `XOR 0x01010101` / `+1` respectively, and that an
+  identical struct produces an identical hash (determinism). The
+  digest is recomputed inline in the test (mirroring
+  `TradeOnlyAgent.sol:124-145`) because `_delegationHash` is
+  internal and cannot be called from a test contract. A live-agent
+  cross-check signs the fuzzed delegation with
+  `vm.sign(DELEGATOR_PK, digest)` and asserts the real
+  `TradeOnlyAgent.isValidDelegation` accepts it, pinning the
+  EIP-712 domain-separator formula against the contract's own
+  implementation. Nonce/id0 are bounded to `type(max)-1` to
+  leave headroom for the `+1` perturbation (Solidity 0.8.26 has
+  default-checked arithmetic). Closes the round-9 red-team finding
+  that only tested each axis in isolation with point values.
+- [x] **Distribute weight vector accounting identity** — fuzz
+  `(w0, w1, w2, w3, deposit)`; normalize weights to `sum == 10000`
+  with an overflow-safe fallback, apply through
+  `requestAllocation` + `executePending`, deposit `deposit` USDC,
+  then assert the aggregator's accounting identity
+  (`sum(legs.currentValue()) + usdc.balanceOf(agg) == totalAssets`)
+  AND the stronger `totalAssets == deposit` invariant. This is the
+  round-14 "share-allowance" gap's sibling: whereas the first-
+  depositor fuzz catches mint-side exploits, this catches
+  distribute-side accounting leaks (silent rounding drift, off-
+  by-one in `_allocatedTotal`, weight-applied-too-late bugs).
+- [x] **BasisHedgeLeg.allocateTo full-boundary sweep** — fuzz
+  `amount ∈ [0, 1e18]`; assert `allocatedUsd == amount` for
+  `amount ≥ 2` (the existing Legs.t.sol point-value test only
+  covered `amount ∈ {0, 1}`), and the two revert strings
+  (`"zero"` at `amount == 0`, `"dust"` at `amount == 1`) hold at
+  every point in the range. Deployed via `vm.deployCode` with a
+  minimal HYPE-balance mock and a no-op writer mock, so the
+  fuzz is hermetic and does not depend on any venue state.
+  The `MockWriter` is required because a bare CALL to
+  `writer == address(0)` reverts with an EvmError that Forge's
+  fuzz engine treats as an unhandled panic.
+
 The file-level `// forge-config: default.fuzz.runs = 512` directive
 is set on the `FuzzCoverage.t.sol` test suite to give the
 first-depositor paths 2× the standard 256 runs (high-complexity
@@ -666,9 +744,10 @@ Documented here so the next author doesn't burn time on them.
   test and no owner-gate to verify. The only mutable state on a leg
   is `fixedApyBps` (covered by KI-4 tests), `latestApyBps` (covered
   indirectly), `history` (uncovered — trivial), `allocatedUsd`,
-  `khypeBalance`/`spotStakeBalance`, and `lastDelegationNonce`
-  (uncovered — trivial). If setters are ever added, that is a spec
-  change to test at that time.
+  `khypeBalance`/`spotStakeBalance`, `nextDelegationNonce`
+  (covered by round-15a `Phase3NonceCleanupTest` — see §2.4),
+  and `lastExecutedNonce` (covered — same sub-suite). If setters are
+  ever added, that is a spec change to test at that time.
 - **`check_repo.py` regex coverage.** `check_repo.py` covers 13
   documentation regexes and 5 solidity-ABI checks. It does not run
   tests. Do not add tests to satisfy a `check_repo.py` finding —

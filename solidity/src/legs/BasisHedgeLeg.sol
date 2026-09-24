@@ -90,7 +90,43 @@ contract BasisHedgeLeg is IYieldLeg, IIntentSubmittingLeg {
     uint256 public perpNotional;
     uint256 public realisedBasisPnl;   // cumulative USDC credited by writer
     uint256 public latestApyBps;
-    uint256 public lastDelegationNonce;
+    /// KI-2b Phase 3 (DESIGN_KI2_SUBMITINTENT.md §6): "the next nonce
+    /// the leg will propose". Renamed from `lastDelegationNonce` — the
+    /// old name described the last one the leg bumped, which conflicted
+    /// with `_nextDelegation()`'s actual "read-before-increment"
+    /// ordering (pre-increment semantics: nonce=0 on the first call,
+    /// nonce=1 on the second, etc.). `nextDelegationNonce` starts at
+    /// 0 and is bumped by 1 after each `_nextDelegation()` call, so it
+    /// reads as "the next nonce this leg will propose next time".
+    uint256 public nextDelegationNonce;
+
+    /// KI-2b Phase 3 (DESIGN_KI2_SUBMITINTENT.md §6): highest
+    /// delegation nonce actually ACKNOWLEDGED by the venue, per
+    /// (delegator, nonce). A (delegator, nonce) pair whose entry here
+    /// is non-zero was forwarded to `writer.openPosition` /
+    /// `writer.closePosition` in a call that returned without reverting.
+    ///
+    /// @dev Written ONLY after `writer.openPosition` /
+    ///      `writer.closePosition` returns without reverting inside
+    ///      `submitIntent` / `submitIntentFromStreamA` — the paths
+    ///      that actually hand a real user-signed delegation to the
+    ///      writer. NOT written from `_fallbackSig()`-gated paths
+    ///      (`allocateTo`, `harvest`, `reduceFrom`) because those use
+    ///      a dev-only zero-sig and don't represent real delegation
+    ///      execution. NOT written from `_nextDelegation()` itself,
+    ///      which bumps `nextDelegationNonce` on every call regardless
+    ///      of venue response — a naive propose-keyed mapping would
+    ///      attribute nonces the venue never saw. A reverted writer
+    ///      call never reaches the mapping write, so "written after
+    ///      a non-reverting writer call" is sufficient to distinguish
+    ///      proposed-but-rejected from proposed-and-acknowledged. The
+    ///      venue does not yet report execution state back through
+    ///      Solidity (DESIGN_KI2_SUBMITINTENT.md §9 Phase 3 note), so
+    ///      this is the simplest correct semantics. Clients that want
+    ///      to know the highest nonce they have pre-signed safely can
+    ///      track their own proposal history; the leg exposes the
+    ///      proposed upper bound separately via `nextDelegationNonce`.
+    mapping(address => mapping(uint256 => uint256)) public lastExecutedNonce;
 
     // TODO: fixedApyBps fallback — remove once live basis oracle
     //       publishes a mark-to-market APY.
@@ -263,7 +299,13 @@ contract BasisHedgeLeg is IYieldLeg, IIntentSubmittingLeg {
         // `expectedApy()` reflects the new value immediately.
         if (address(oracle) == address(0)) latestApyBps = v;
     }
-    function bumpNonce() external onlyOwner { lastDelegationNonce += 1; }
+    // KI-2b Phase 3 (DESIGN_KI2_SUBMITINTENT.md §9): `bumpNonce()`
+    // REMOVED. Post-increment semantics in `_nextDelegation()` mean
+    // a reverted writer call does not advance the counter, so the
+    // delegator can retry with the same nonce; the replay guard
+    // (`submittedIntents`) is the correct belt for a re-submission.
+    // See the test-suite doc comment on
+    // `Phase3NonceCleanupTest.bumpNonceRemoval` for the pin.
 
     /// KI-2b Phase 2: wire the aggregator address AFTER the aggregator
     /// is deployed. Owner-only.
@@ -343,8 +385,11 @@ contract BasisHedgeLeg is IYieldLeg, IIntentSubmittingLeg {
         }
 
         // Mark as submitted AFTER the writer call so a revert doesn't
-        // burn the nonce.
+        // burn the nonce. Also record the venue-acknowledged nonce for
+        // `lastExecutedNonce` — a reverted writer call never reaches
+        // this line (see the @dev note on the mapping).
         submittedIntents[intentKey] = true;
+        lastExecutedNonce[delegator][d.nonce] = d.nonce;
 
         allocatedUsd += amount;
         notionalAllocated = amount;
@@ -397,6 +442,9 @@ contract BasisHedgeLeg is IYieldLeg, IIntentSubmittingLeg {
         }
 
         submittedIntents[intentKey] = true;
+        // Venue-acknowledged nonce bookkeeping — only written after the
+        // writer call succeeded (reverts never reach this line).
+        lastExecutedNonce[delegator][d.nonce] = d.nonce;
 
         allocatedUsd += amount;
         notionalAllocated = amount;
@@ -559,7 +607,20 @@ contract BasisHedgeLeg is IYieldLeg, IIntentSubmittingLeg {
     function _nextDelegation(uint256 notional) internal returns (
         ITradeOnlyAgent.Delegation memory d
     ) {
-        lastDelegationNonce += 1;
+        // KI-2b Phase 3 (DESIGN_KI2_SUBMITINTENT.md §9 Phase 3):
+        // Pre-increment semantics — the value written into `d.nonce`
+        // is the storage value BEFORE the increment. So the first call
+        // proposes nonce=0, the second proposes nonce=1, and so on.
+        // `nextDelegationNonce` reads as "the next nonce this leg will
+        // propose on the next `_nextDelegation()` call" (i.e. the
+        // highest nonce proposed, plus one). Solidity rolls back ALL
+        // storage changes on revert (including the bump), so a reverted
+        // writer call leaves the counter unchanged and the next call
+        // re-proposes the same nonce; the `submittedIntents` guard
+        // (keyed on `keccak(keeper, nonce, salt)`) is what blocks
+        // re-submission of an already-executed nonce.
+        uint256 n = nextDelegationNonce;
+        nextDelegationNonce = n + 1;
         uint256[] memory ids = new uint256[](1);
         ids[0] = HYPE_ASSET_ID;
         d = ITradeOnlyAgent.Delegation({
@@ -568,7 +629,7 @@ contract BasisHedgeLeg is IYieldLeg, IIntentSubmittingLeg {
             maxNotional: notional,
             maxPerOrder: notional,
             expiresAt: 0,
-            nonce: uint64(lastDelegationNonce),
+            nonce: uint64(n),
             salt: bytes32(0)
         });
     }

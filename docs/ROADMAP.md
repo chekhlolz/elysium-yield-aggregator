@@ -631,8 +631,84 @@ implementation deferred), (b) KI-2b Phase 2 aggregator refactor
 
 ### 2.10 Round-15 changelog
 
-Round-15 (2026-09-24) — docs-only. No `solidity/src/` changes; no
-changes to any finalized test file, deploy harness, or verifier.
+Round-15 (2026-09-24) — mixed: 15a touches `solidity/src/` and
+`solidity/test/`; 15b touches `solidity/test/FuzzCoverage.t.sol`;
+15c is docs-only. No changes to any finalized test file, deploy
+harness, or verifier.
+
+- **15a**: KI-2b Phase 3 cleanup (DESIGN_KI2_SUBMITINTENT.md §9 Phase
+  3, DESIGN_KI2B_AGGREGATOR_STREAM_A.md Phase 3 bullet). Two perp
+  legs (`PerpFundingLeg.sol`, `BasisHedgeLeg.sol`): deleted
+  `bumpNonce()` (owner-only setter, was dead-lettered with no
+  test — see TEST_COVERAGE_GAP.md §2.4); renamed
+  `lastDelegationNonce` → `nextDelegationNonce` (semantics flipped
+  from post-increment to pre-increment, matching the design doc §6
+  rationale — first call proposes nonce=0, second proposes nonce=1,
+  and the value written into `Delegation.nonce` is the pre-increment
+  value); added `mapping(address => mapping(uint256 => uint256))
+  public lastExecutedNonce` keyed by `(delegator, nonce)`, written
+  ONLY after a successful `_writeOpen`/`_writeClose` returns inside
+  `submitIntent`/`submitIntentFromStreamA` — NOT from the fallback
+  `_writeOpen`/`_writeClose` path (gated by `devFallbackEnabled`,
+  uses `_fallbackSig` and does not represent real venue execution).
+  New `Phase3NonceCleanupTest` sub-suite in `solidity/test/Legs.t.sol`
+  (10 tests): `nextDelegationNonce` starts at 0 and increments by 1
+  per allocate, storage rollback on writer revert (pre-increment
+  atomicity), `lastExecutedNonce` written after successful
+  stream-B/`submitIntent` and stream-A/`submitIntentFromStreamA`,
+  NOT written on leg-side per-order cap rejection, NOT written on
+  writer-side revert (via `MockWriterFailOpen`), NOT written by
+  legacy `allocateTo`, keyed by delegator not keeper. Doc updates:
+  TEST_COVERAGE_GAP.md (lines 260, 284, 669), DESIGN_KI2_SUBMITINTENT
+  §9 Phase 3, DESIGN_KI2B_AGGREGATOR_STREAM_A Phase 3 bullet, this
+  §2.10 entry. Not touched: `KHYPELeg.sol`, `SpotStakingLeg.sol`
+  (no nonces), `FuzzCoverage.t.sol` (agent 15b), KINETIQ_EMAIL_DRAFT /
+  AUDIT_SUMMARY (agent 15c). TradeOnlyAgent delegation struct
+  unchanged.
+
+- **15b**: fuzz gap closure (round-15b). Three new fuzz tests in
+  `solidity/test/FuzzCoverage.t.sol` close the three remaining
+  open items in `docs/TEST_COVERAGE_GAP.md §6`:
+
+  - `FuzzDelegationKey.testFuzz_DelegationKey_uniqueness` — fuzzes
+    `(nonce1, salt1, id0, maxNotional, maxPerOrder, keeper)` and
+    asserts the EIP-712 `digestStruct` differs when any of
+    `nonce`, `salt`, or `assetIds` is perturbed; pins a
+    determinism invariant and cross-checks against the live
+    `TradeOnlyAgent.isValidDelegation` via `vm.sign`. Because
+    `_delegationHash` is internal, the digest is recomputed inline
+    in the test (mirroring `TradeOnlyAgent.sol:124-145`).
+  - `FuzzDistributeWeights.testFuzz_Distribute_weightVector` —
+    fuzzes `(w0, w1, w2, w3, deposit)`, normalizes the weights to
+    `sum == 10000` with an overflow-safe fallback, applies them
+    through `requestAllocation` + `executePending` (the only
+    keeper-governance path), deposits `deposit` USDC, and asserts
+    the aggregator's accounting identity
+    (`sum(legs.currentValue()) + usdc.balanceOf(agg) == totalAssets`)
+    plus the stronger `totalAssets == deposit` invariant.
+  - `FuzzBasisAllocateBoundaries.testFuzz_BasisAllocate_boundaries`
+    — fuzzes `amount ∈ [0, 1e18]` USDC base units and asserts
+    `allocatedUsd == amount` for `amount ≥ 2` and reverts with
+    `"zero"` at `amount == 0` / `"dust"` at `amount == 1`. Deploys
+    `BasisHedgeLeg` through `vm.deployCode("src/legs/BasisHedgeLeg.sol",
+    ...)` because the file imports both `YieldAggregator.sol`
+    (which declares `IERC20Minimal` locally) and would otherwise
+    clash with `src/interfaces/IERC20.sol`'s same-named interface.
+    A minimal `MockHypeBalance` (returns 0) short-circuits
+    `_buyHype` when `router == 0`, and a no-op `MockWriter` is
+    required because a bare CALL to `writer == address(0)` reverts
+    with an EvmError that Forge's fuzz engine treats as an
+    unhandled panic.
+
+  `forge test` at the 15b tip: three new fuzz tests added (one new
+  contract per test, all in `FuzzCoverage.t.sol`). Together with
+  15a's `Phase3NonceCleanupTest` the round-15 test suite is 225 tests
+  across 21 suites (baseline 212 + 10 from 15a + 3 from 15b), all
+  green. The file-level `// forge-config: default.fuzz.runs = 512`
+  directive is preserved (the pre-existing one). Not touched:
+  `KHYPELeg.sol`, `SpotStakingLeg.sol`, `PerpFundingLeg.sol` (§15a),
+  `BasisHedgeLeg.sol` (§15a), `Legs.t.sol` (§15a),
+  `KINETIQ_EMAIL_DRAFT.md` (§15c), `AUDIT_SUMMARY.md` (§15c).
 
 - **15c**: refreshed `docs/KINETIQ_EMAIL_DRAFT.md` to reflect
   round-14 reality (212 tests / 17 suites, M3 closed, 8 KI closed +

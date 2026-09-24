@@ -1361,6 +1361,381 @@ contract KI2StakingLegsNegativeTest is KI2Base {
 }
 
 // ==================================================================
+// Round-15a (KI-2b Phase 3, DESIGN_KI2_SUBMITINTENT.md §9 Phase 3):
+// nonce-cleanup sub-suite.
+//
+// Three changes to pin:
+//   (1) `lastDelegationNonce` renamed to `nextDelegationNonce` and
+//       `_nextDelegation()` uses pre-increment semantics — the value
+//       written into `Delegation.nonce` is the storage value BEFORE
+//       the increment, then the counter is bumped by 1. First call
+//       proposes nonce=0, second proposes nonce=1, etc.
+//   (2) `bumpNonce()` REMOVED. The function no longer exists on
+//       either perp leg; a caller would hit Solidity's `function
+//       selector not found` fallback. We don't add a test that tries
+//       to call it (there's no testable failure mode for a missing
+//       symbol — the compiler would reject it). The pin is:
+//         * The name `bumpNonce` is absent from `solidity/src/legs/`
+//           (grep in check_repo.py + design doc §9).
+//         * `nextDelegationNonce` is monotonic across `_nextDelegation`
+//           calls (covered by test #1 below), which is the invariant
+//           the removed `bumpNonce()` was originally guarding.
+//   (3) `lastExecutedNonce(delegator, nonce)` view records only
+//       venue-acknowledged nonces. Written ONLY inside
+//       `submitIntent` / `submitIntentFromStreamA` immediately after
+//       `_writeOpen` returns without reverting — so a writer revert
+//       (e.g. `notional > d.maxPerOrder`) never reaches the mapping
+//       write. NOT written from the `_fallbackSig()`-gated legacy
+//       paths (`allocateTo`, `harvest`, `reduceFrom`) because those
+//       use a dev-only zero-sig and don't represent real delegation
+//       execution.
+//
+// `bumpNonce` removal pin: see the note above; no runtime test is
+// possible since the function no longer exists in the ABI.
+// ==================================================================
+
+/// Mock writer that adds a `failOpen` flag. When the flag is set,
+/// `openPosition` reverts so we can exercise the "writer reverted,
+/// so `lastExecutedNonce` must not be written" path in
+/// Phase3NonceCleanupTest. Inherits from MockWriter to reuse its
+/// invocation-recording storage; the `openPosition` override re-
+/// implements the cap and v-check then delegates to the recording
+/// logic by pushing into the inherited arrays directly.
+contract MockWriterFailOpen is IElysiumCoreWriter {
+    bytes32[]  internal _hashSig;
+    address[]  internal _keeper;
+    uint64[]   internal _nonce;
+    bytes32[]  internal _salt;
+    uint256[]  internal _notional;
+    bool[]     internal _isOpen;
+
+    bool public failOpen;
+    function setFailOpen(bool b) external { failOpen = b; }
+
+    function count() external view returns (uint256) { return _hashSig.length; }
+    function hashSig(uint256 i) external view returns (bytes32) { return _hashSig[i]; }
+    function keeperAt(uint256 i) external view returns (address) { return _keeper[i]; }
+    function nonceAt(uint256 i) external view returns (uint64) { return _nonce[i]; }
+    function saltAt(uint256 i) external view returns (bytes32) { return _salt[i]; }
+    function notionalAt(uint256 i) external view returns (uint256) { return _notional[i]; }
+    function isOpenAt(uint256 i) external view returns (bool) { return _isOpen[i]; }
+
+    function openPosition(
+        uint256 assetId,
+        Side side,
+        uint256 notional,
+        address delegator,
+        ITradeOnlyAgent.Delegation calldata d,
+        ITradeOnlyAgent.Signature calldata sig
+    ) external override {
+        require(!failOpen, "writer: fail");
+        require(notional <= d.maxPerOrder, "writer: per-order cap");
+        require(sig.v == 27 || sig.v == 28, "writer: bad v");
+        _hashSig.push(keccak256(abi.encode(sig.v, sig.r, sig.s)));
+        _keeper.push(d.keeper);
+        _nonce.push(d.nonce);
+        _salt.push(d.salt);
+        _notional.push(notional);
+        _isOpen.push(true);
+    }
+
+    function closePosition(
+        uint256 assetId,
+        Side side,
+        uint256 notional,
+        address delegator,
+        ITradeOnlyAgent.Delegation calldata d,
+        ITradeOnlyAgent.Signature calldata sig
+    ) external override {
+        require(notional <= d.maxPerOrder, "writer: per-order cap");
+        require(sig.v == 27 || sig.v == 28, "writer: bad v");
+        _hashSig.push(keccak256(abi.encode(sig.v, sig.r, sig.s)));
+        _keeper.push(d.keeper);
+        _nonce.push(d.nonce);
+        _salt.push(d.salt);
+        _notional.push(notional);
+        _isOpen.push(false);
+    }
+}
+
+/// Round-15a Phase-3 test base. Extends KI2Base's mock rig and adds
+/// one mock-writer wrapper that can be told to revert on
+/// `openPosition` — used to exercise the "writer reverted, so
+/// `lastExecutedNonce` must not be written" path.
+abstract contract Phase3Base is KI2Base {
+    MockWriterFailOpen internal writerFailOpen;
+
+    function setUp() public override {
+        KI2Base.setUp();
+        writerFailOpen = new MockWriterFailOpen();
+    }
+
+    /// Deploy a perp leg wired to the failure-capable writer mock so
+    /// we can force a `_writeOpen` revert and observe the
+    /// `lastExecutedNonce` mapping behaviour.
+    function _deployPerpWithFailingWriter() internal returns (PerpFundingLeg) {
+        return new PerpFundingLeg(
+            address(usdcTok), address(hypeTok), address(0),
+            address(writerFailOpen), address(toa), address(fundsrc), address(oracleMock),
+            KI2_DELEGATOR, 1000
+        );
+    }
+
+    function _deployBasisWithFailingWriter() internal returns (BasisHedgeLeg) {
+        return new BasisHedgeLeg(
+            address(usdcTok), address(hypeTok), address(0),
+            address(writerFailOpen), address(toa), address(oracleMock),
+            KI2_DELEGATOR, 1000
+        );
+    }
+}
+
+contract Phase3NonceCleanupTest is Phase3Base {
+    /// @dev bumpNonce removal is pinned by ABSENCE:
+    ///   - `bumpNonce` is not a member of `PerpFundingLeg` or
+    ///     `BasisHedgeLeg` (the compiler rejects any reference to
+    ///     the selector; there is no runtime failure mode to test).
+    ///   - The invariant bumpNonce was guarding — that
+    ///     `nextDelegationNonce` is monotonic across `_nextDelegation`
+    ///     calls — is exercised directly by
+    ///     `test_nextDelegationNonce_incrementsPerAllocate`.
+    ///   - `grep -rn "bumpNonce" solidity/src/legs/` returns nothing
+    ///     after round-15a.
+
+    /// @dev bumpNonce removal is pinned by ABSENCE:
+    ///   - `bumpNonce` is not a member of `PerpFundingLeg` or
+    ///     `BasisHedgeLeg` (the compiler rejects any reference to
+    ///     the selector; there is no runtime failure mode to test).
+    ///   - The invariant bumpNonce was guarding — that
+    ///     `nextDelegationNonce` is monotonic across `_nextDelegation`
+    ///     calls — is exercised directly by
+    ///     `test_nextDelegationNonce_incrementsPerAllocate`.
+    ///   - `grep -rn "bumpNonce" solidity/src/legs/` returns nothing
+    ///     after round-15a.
+
+    /// Wrap any test in a `startPrank(KI2_OWNER)` block. The legs are
+    /// deployed as KI2_OWNER, and `submitIntent` / `setAggregator`
+    /// accept the leg's owner (or the delegator) as the caller.
+    function test_nextDelegationNonce_incrementsPerAllocate() public {
+        vm.startPrank(KI2_OWNER);
+        PerpFundingLeg leg = _deployPerp();
+        assertEq(leg.nextDelegationNonce(), 0, "starts at 0");
+        leg.allocateTo(KI2_USD_100);
+        // First call to `_nextDelegation` proposes nonce=0, then bumps
+        // the counter to 1.
+        assertEq(leg.nextDelegationNonce(), 1, "after 1st allocate");
+        leg.allocateTo(KI2_USD_100);
+        assertEq(leg.nextDelegationNonce(), 2, "after 2nd allocate");
+        leg.allocateTo(KI2_USD_100);
+        assertEq(leg.nextDelegationNonce(), 3, "after 3rd allocate");
+        vm.stopPrank();
+    }
+
+    function test_nextDelegationNonce_incrementsPerAllocate_basis() public {
+        vm.startPrank(KI2_OWNER);
+        BasisHedgeLeg leg = _deployBasis();
+        assertEq(leg.nextDelegationNonce(), 0, "starts at 0");
+        leg.allocateTo(KI2_USD_100);
+        assertEq(leg.nextDelegationNonce(), 1, "after 1st allocate");
+        leg.allocateTo(KI2_USD_100);
+        assertEq(leg.nextDelegationNonce(), 2, "after 2nd allocate");
+        vm.stopPrank();
+    }
+
+    /// `nextDelegationNonce` is bumped by `_nextDelegation()` and
+    /// rolled back by Solidity on a writer revert — the "atomic"
+    /// invariant that the removed `bumpNonce()` escape-hatch was
+    /// designed to bypass. Reverts do NOT advance `lastExecutedNonce`.
+    function test_nextDelegationNonce_increments_even_whenWriterReverts() public {
+        vm.startPrank(KI2_OWNER);
+        PerpFundingLeg leg = _deployPerpWithFailingWriter();
+        writerFailOpen.setFailOpen(true);
+        // allocateTo calls `_nextDelegation` which bumps the counter,
+        // then `_writeOpen` which reverts because failOpen == true.
+        // Expect the whole call to revert — but the counter bump
+        // inside `_nextDelegation` happens BEFORE `_writeOpen`, and
+        // Solidity rolls back ALL storage changes on a revert, so
+        // `nextDelegationNonce` stays at 0. This is the correct
+        // behaviour: an atomic revert means nothing about the call
+        // persists, so the leg is still "clean" for the delegator's
+        // next attempt.
+        vm.expectRevert(bytes("writer: fail"));
+        leg.allocateTo(KI2_USD_100);
+        assertEq(leg.nextDelegationNonce(), 0,
+                 "reverted call rolls back counter bump too");
+        // And lastExecutedNonce is untouched — allocateTo goes through
+        // _fallbackSig, not lastExecutedNonce.
+        assertEq(leg.lastExecutedNonce(KI2_DELEGATOR, 0), 0,
+                 "allocateTo-with-fail leaves lastExecutedNonce at 0");
+        vm.stopPrank();
+    }
+
+    function test_lastExecutedNonce_written_afterSuccessfulStreamB_submitIntent() public {
+        vm.startPrank(KI2_OWNER);
+        PerpFundingLeg leg = _deployPerp();
+        ITradeOnlyAgent.Delegation memory d = _mkDelegation(
+            address(leg), KI2_USD_100, 5
+        );
+        ITradeOnlyAgent.Signature memory sig = _mkSig();
+        leg.submitIntent(d, sig, KI2_USD_100);
+        assertEq(leg.lastExecutedNonce(KI2_DELEGATOR, 5), 5,
+                 "lastExecutedNonce[delegator][5] == 5 after submit");
+        assertEq(leg.lastExecutedNonce(KI2_DELEGATOR, 0), 0,
+                 "unrelated nonce is 0");
+        assertEq(leg.lastExecutedNonce(KI2_BADKEEPER, 5), 0,
+                 "unrelated delegator is 0");
+        assertEq(leg.allocatedUsd(), KI2_USD_100, "allocatedUsd updated");
+        vm.stopPrank();
+    }
+
+    function test_lastExecutedNonce_written_afterSuccessfulStreamB_submitIntent_basis() public {
+        vm.startPrank(KI2_OWNER);
+        BasisHedgeLeg leg = _deployBasis();
+        ITradeOnlyAgent.Delegation memory d = _mkDelegation(
+            address(leg), KI2_USD_100, 5
+        );
+        ITradeOnlyAgent.Signature memory sig = _mkSig();
+        leg.submitIntent(d, sig, KI2_USD_100);
+        assertEq(leg.lastExecutedNonce(KI2_DELEGATOR, 5), 5,
+                 "BasisHedgeLeg: lastExecutedNonce recorded");
+        assertEq(leg.allocatedUsd(), KI2_USD_100);
+        vm.stopPrank();
+    }
+
+    /// Stream-A success path also records to lastExecutedNonce.
+    function test_lastExecutedNonce_written_afterSuccessfulStreamA_submitIntent() public {
+        address aggregatorAddr = address(0x9999);
+        vm.startPrank(KI2_OWNER);
+        PerpFundingLeg leg = _deployPerp();
+        leg.setAggregator(aggregatorAddr);
+        ITradeOnlyAgent.Delegation memory d = _mkDelegation(
+            aggregatorAddr, KI2_USD_100, 9
+        );
+        ITradeOnlyAgent.Signature memory sig = _mkSig();
+        uint256 returned = leg.submitIntentFromStreamA(d, sig, KI2_USD_100);
+        assertEq(returned, KI2_USD_100);
+        assertEq(leg.lastExecutedNonce(KI2_DELEGATOR, 9), 9,
+                 "stream-A: lastExecutedNonce[delegator][9] == 9");
+        vm.stopPrank();
+    }
+
+    /// Writer-revert path: the leg's pre-write checks pass, the
+    /// `_writeOpen` call reverts because `notional > d.maxPerOrder`,
+    /// and `lastExecutedNonce` MUST NOT be written for the proposed
+    /// nonce. This is the invariant that separates "proposed by the
+    /// leg" from "acknowledged by the venue".
+    function test_lastExecutedNonce_NOT_written_whenWriterReverts_perpStreamB() public {
+        vm.startPrank(KI2_OWNER);
+        PerpFundingLeg leg = _deployPerp();
+        // Set maxPerOrder smaller than the leg's 50/50 split so the
+        // writer's cap check reverts. d.nonce=3 is the nonce the
+        // leg will hand to the writer (submitIntent forwards d as-is,
+        // no re-mint).
+        ITradeOnlyAgent.Delegation memory d = _mkDelegation(
+            address(leg), 25, 3
+        );
+        ITradeOnlyAgent.Signature memory sig = _mkSig();
+        // The leg's own `require(amount <= d.maxPerOrder, "per-order cap")`
+        // check fires BEFORE the writer call, so we get the leg's
+        // revert message, not the writer's. That's the correct
+        // belt-over-fix behaviour: the leg's local guard catches this
+        // before the writer is ever called.
+        vm.expectRevert(bytes("per-order cap"));
+        leg.submitIntent(d, sig, KI2_USD_100);
+        // Writer never got called, so lastExecutedNonce is 0.
+        assertEq(leg.lastExecutedNonce(KI2_DELEGATOR, 3), 0,
+                 "leg-side per-order cap leaves lastExecutedNonce at 0");
+        assertEq(leg.allocatedUsd(), 0, "allocatedUsd unchanged");
+        vm.stopPrank();
+    }
+
+    /// Writer-revert path with the writer-side cap check firing.
+    /// We set `d.maxPerOrder` large enough that the leg accepts the
+    /// amount, but the writer mock sees a smaller cap (via
+    /// `MockWriterFailOpen`'s independent `failOpen` flag + normal
+    /// notional check) and reverts. This exercises the mapping
+    /// write-skip path when the writer (not the leg) rejects.
+    function test_lastExecutedNonce_NOT_written_whenWriterMockReverts_perpStreamB() public {
+        vm.startPrank(KI2_OWNER);
+        PerpFundingLeg leg = _deployPerpWithFailingWriter();
+        writerFailOpen.setFailOpen(true);
+        ITradeOnlyAgent.Delegation memory d = _mkDelegation(
+            address(leg), KI2_USD_100, 7
+        );
+        ITradeOnlyAgent.Signature memory sig = _mkSig();
+        vm.expectRevert(bytes("writer: fail"));
+        leg.submitIntent(d, sig, KI2_USD_100);
+        // Writer reverted before the mapping write — nonce is 0.
+        assertEq(leg.lastExecutedNonce(KI2_DELEGATOR, 7), 0,
+                 "reverted writer leaves lastExecutedNonce at 0");
+        assertEq(leg.allocatedUsd(), 0, "allocatedUsd unchanged");
+        vm.stopPrank();
+    }
+
+    /// The `_fallbackSig()`-gated legacy `allocateTo` path does NOT
+    /// write to `lastExecutedNonce` even on success, because those
+    /// paths use a dev-only zero-sig and don't represent real
+    /// delegation execution. This is the invariant called out in the
+    /// @dev note on the mapping.
+    function test_lastExecutedNonce_NOT_written_byLegacyAllocateTo() public {
+        vm.startPrank(KI2_OWNER);
+        PerpFundingLeg leg = _deployPerp();
+        leg.allocateTo(KI2_USD_100);
+        // The leg's `_nextDelegation` proposed nonce=0, then bumped
+        // the counter. But no submission happened via submitIntent /
+        // submitIntentFromStreamA, so `lastExecutedNonce` stays 0 for
+        // any delegator+nonce pair.
+        assertEq(leg.lastExecutedNonce(KI2_DELEGATOR, 0), 0,
+                 "legacy allocateTo does not touch lastExecutedNonce");
+        assertEq(leg.allocatedUsd(), KI2_USD_100,
+                 "allocatedUsd reflects the legacy path");
+        vm.stopPrank();
+    }
+
+    /// Boundary: `submitIntent` records for the exact (delegator,
+    /// nonce) tuple from the delegation envelope. Two different
+    /// delegators with the same nonce get independent entries on
+    /// their respective legs.
+    function test_lastExecutedNonce_keyedByDelegatorNotKeeper() public {
+        // First leg: default delegator KI2_DELEGATOR.
+        vm.startPrank(KI2_OWNER);
+        PerpFundingLeg leg1 = _deployPerp();
+        vm.stopPrank();
+
+        // Second leg: different delegator via a separate deployment.
+        // Deployed by the test contract (default caller), so its
+        // owner is the test contract itself; submitIntent from
+        // that same address works via the "msg.sender == owner"
+        // check.
+        PerpFundingLeg leg2 = new PerpFundingLeg(
+            address(usdcTok), address(hypeTok), address(0),
+            address(writer), address(toa), address(fundsrc), address(oracleMock),
+            address(0xABC0), 1000
+        );
+
+        ITradeOnlyAgent.Delegation memory d1 = _mkDelegation(
+            address(leg1), KI2_USD_100, 42
+        );
+        ITradeOnlyAgent.Delegation memory d2 = _mkDelegation(
+            address(leg2), KI2_USD_100, 42
+        );
+        ITradeOnlyAgent.Signature memory sig = _mkSig();
+
+        vm.prank(KI2_OWNER);
+        leg1.submitIntent(d1, sig, KI2_USD_100);
+        // leg2's owner is the test contract itself.
+        leg2.submitIntent(d2, sig, KI2_USD_100);
+
+        assertEq(leg1.lastExecutedNonce(KI2_DELEGATOR, 42), 42);
+        assertEq(leg1.lastExecutedNonce(address(0xABC0), 42), 0,
+                 "leg1 has no entry for leg2's delegator");
+        assertEq(leg2.lastExecutedNonce(KI2_DELEGATOR, 42), 0,
+                 "leg2 has no entry for leg1's delegator");
+        assertEq(leg2.lastExecutedNonce(address(0xABC0), 42), 42);
+    }
+}
+
+// ==================================================================
 // Round-8 hardening (KI-1 §9.2 + §9.3 follow-ups).
 //
 //   (a) harvest() must NOT decrement `allocatedUsd` — the realised
