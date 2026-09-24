@@ -5,10 +5,10 @@
 **Subject**: Elysium Yield Aggregator + Trade-Only-Agent Protocol — proposal for builders allocation
 
 > Status: **DRAFT, NOT SENT.** Repo is pushed to
-> https://github.com/chekhlolz/elysium-yield-aggregator (PUBLIC, master,
-> `cb14839`). Read through and adjust before sending. I did not and will
-> not send on your behalf without explicit approval — this is external
-> communication.
+> https://github.com/chekhlolz/elysium-yield-aggregator (PUBLIC, master;
+> see `git log` for current HEAD). Read through and adjust before
+> sending. I did not and will not send on your behalf without explicit
+> approval — this is external communication.
 
 ---
 
@@ -72,8 +72,8 @@ ship exactly that measurement.
 **Solidity reference implementation is compiled** (solc 0.8.26, 0
 errors, 0 warnings):
 
-- 7 Solidity contracts totaling **~62.1 KB** of deployed bytecode
-  across 21 Solidity artifacts (contracts + interfaces + lib).
+- 8 Solidity contracts totaling **~74.0 KB** of deployed bytecode
+  across 22 Solidity artifacts (contracts + interfaces + lib).
 - `YieldAggregator.sol` — ERC-4626 vault, keeper + timelock (owner or
   keeper-only `cancelPending`), Stream-A delegation signing with a
   dev-fallback gate.
@@ -82,11 +82,13 @@ errors, 0 warnings):
   prices).
 - `TradeOnlyAgent.sol` — EIP-712 trade delegation with canonical
   ECDSA recovery (rejects non-canonical `s` values).
-- Four leg contracts: `KHYPELeg`, `SpotStakingLeg`, `PerpFundingLeg`,
-  `BasisHedgeLeg` — all four `IYieldLeg`-compliant, all four wired to
-  mock-friendly dependency interfaces.
-- 10 interfaces in `solidity/src/interfaces/` (14 with `IERC20Minimal`
-  and `IMarketDataFeed`).
+- Five leg contracts: `KHYPELeg`, `SpotStakingLeg`, `PerpFundingLeg`,
+  `BasisHedgeLeg`, `LiminalXHYPELeg` — all five `IYieldLeg`-compliant
+  (the 5th via the new `IXHYPELeg` wrapper), all wired to mock-friendly
+  dependency interfaces. The 5th leg was added in round-17 as the
+  aggregator's path into the 14.50% APY Liminal xHYPE vault.
+- 10 interfaces in `solidity/src/interfaces/` (14 with `IERC20Minimal`,
+  `IMarketDataFeed`, `IXHYPELeg`, and `IIntentSubmittingLeg`).
 
 **Dev tooling also in the repo** (open-source, Apache-2.0):
 
@@ -119,7 +121,7 @@ marketing) actually means in code.
   single delegation.
 
 Solidity reference implementation compiles: `TradeOnlyAgent.sol`, part
-of the 7-contract suite above, EIP-712 type-hash, venue-local notional
+of the 8-contract suite above, EIP-712 type-hash, venue-local notional
 tracking.
 
 **Repo**: https://github.com/chekhlolz/elysium-yield-aggregator
@@ -175,7 +177,9 @@ Not asking for:
 
 ### Current repo state (in case this saves you a link)
 
-- 225 forge tests green across 21 suites.
+- 467 tests total, all green: 297 forge (solidity/) + 15 forge
+  (elix-kit/) + 102 node:test (keeper-runtime/) + 53 forge
+  (dev-harness/).
 - `forge invariant` passing on 3 aggregator invariants.
 - External verifier (`check_repo.py`) at 0 FAIL.
 - Milestone M3 (testnet-deployable aggregator with adversarial security
@@ -184,8 +188,14 @@ Not asking for:
   KI-8), plus 7 round-9 adversarial red-team fixes, plus KI-2b
   Phase 2 (stream-A aggregator delegation refactor) and Phase 3 (nonce
   cleanup) — all closed with design docs + implementation + tests.
-- Commit history: 20 commits across 15 waves of work, all committed, no
-  uncommitted changes. Repo public at
+- Round-17 added the 5th leg (`LiminalXHYPELeg.sol`) targeting the
+  14.50% APY Liminal xHYPE vault as an off-Elysium reference integration;
+  round-21 shipped the keeper daemon core (`KeeperDaemon` polling loop
+  with monotonic nonces, 60-tx sliding-window rate limit, mock venue
+  adapter); round-22 added the ecosystem dashboard as a shareable
+  DeFiLlama snapshot.
+- Commit history: 50 commits across 25 rounds of work, all committed,
+  no uncommitted changes. Repo public at
   https://github.com/chekhlolz/elysium-yield-aggregator since 2026-09-24.
 
 ---
@@ -209,7 +219,8 @@ Alexey
 1. **Placeholders filled** — URL, name, email, handle are all set.
    Read through the body once before sending; nothing left as `<...>`.
 2. **Repo is public.** https://github.com/chekhlolz/elysium-yield-aggregator
-   (master, `cb14839`, 20 commits, `forge test` 225/225 green).
+   (master; see `git log` for current HEAD; 50 commits, `forge test`
+   297/297 green, 467 tests repo-wide).
 3. **No Kinetiq builders email exists publicly.** I checked
    `elysium.kinetiq.xyz` and `kinetiq.xyz` — the only public channels
    are Discord (`https://discord.kinetiq.xyz`) and X (`@Enter_Elysium`,
