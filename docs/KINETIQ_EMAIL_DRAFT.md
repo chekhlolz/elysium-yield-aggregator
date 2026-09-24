@@ -219,7 +219,7 @@ Alexey
 1. **Placeholders filled** — URL, name, email, handle are all set.
    Read through the body once before sending; nothing left as `<...>`.
 2. **Repo is public.** https://github.com/chekhlolz/elysium-yield-aggregator
-   (master; see `git log` for current HEAD; 50 commits, `forge test`
+   (master; see `git log` for current HEAD; 51 commits, `forge test`
    297/297 green, 467 tests repo-wide).
 3. **No Kinetiq builders email exists publicly.** I checked
    `elysium.kinetiq.xyz` and `kinetiq.xyz` — the only public channels
