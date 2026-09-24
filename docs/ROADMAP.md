@@ -629,6 +629,21 @@ implementation deferred), (b) KI-2b Phase 2 aggregator refactor
   venue-configurable cap. The test only proves the cap *math* is
   right, not that the venue is configured correctly.
 
+### 2.10 Round-15 changelog
+
+Round-15 (2026-09-24) — docs-only. No `solidity/src/` changes; no
+changes to any finalized test file, deploy harness, or verifier.
+
+- **15c**: refreshed `docs/KINETIQ_EMAIL_DRAFT.md` to reflect
+  round-14 reality (212 tests / 17 suites, M3 closed, 8 KI closed +
+  round-9 red-team fixes, +3.47% APY median empirical alpha framed
+  as a complementary regime-aware layer, reference-quality not
+  audited, Apache-2.0 license, narrow builders-allocation ask).
+  Added `docs/AUDIT_SUMMARY.md` as the M4 gate entry point:
+  scope, 7-contract inventory, test coverage, adversarial-review
+  history (rounds 2 → 14), open items, verification commands,
+  repo hygiene, and license/IP.
+
 ## 3. Kinetiq conversation
 
 **Send this when**: the aggregator sim produces alpha >= 0 on the real
