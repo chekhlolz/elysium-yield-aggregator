@@ -144,16 +144,19 @@ landed this week — see `docs/ROADMAP.md §2.1`:
 
 | File | Bytes | ABI entries |
 |---|---|---|
-| `src/aggregator/YieldAggregator.sol` | 14,413 | 48 |
+| `src/aggregator/YieldAggregator.sol` | 17,880 | 54 |
 | `src/delegation/TradeOnlyAgent.sol` | 3,103 | 8 |
-| `src/keeper/RegimeDetector.sol` | 2,884 | 13 |
+| `src/keeper/RegimeDetector.sol` | 3,334 | 15 |
 | `src/legs/KHYPELeg.sol` | 7,743 | 28 |
 | `src/legs/SpotStakingLeg.sol` | 7,767 | 29 |
 | `src/legs/PerpFundingLeg.sol` | 13,149 | 41 |
 | `src/legs/BasisHedgeLeg.sol` | 13,137 | 42 |
+| `src/legs/LiminalXHYPELeg.sol` | 7,849 | 31 |
 | `src/interfaces/IYieldAggregator.sol` | 0 | 27 |
 | `src/interfaces/ITradeOnlyAgent.sol` | 0 | 5 |
 | `src/interfaces/IYieldLeg.sol` | 0 | 10 |
+| `src/interfaces/IXHYPELeg.sol` | 0 | 2 |
+| `src/interfaces/IIntentSubmittingLeg.sol` | 0 | 4 |
 | `src/interfaces/IERC20.sol` | 0 | 5 |
 | `src/interfaces/IERC20Router.sol` | 0 | 3 |
 | `src/interfaces/IElysiumCoreWriter.sol` | 0 | 2 |
@@ -161,8 +164,9 @@ landed this week — see `docs/ROADMAP.md §2.1`:
 | `src/interfaces/IPriceOracle.sol` | 0 | 2 |
 | `src/interfaces/IStakingPool.sol` | 0 | 9 |
 
-Total: 62,076 bytes across all contracts (including the `SafeERC20`
-library, `RegimeId` enum, and the minimal `IERC20Minimal` facade).
+Total: 73,962 bytes across the 8 deployable contracts (the `SafeERC20`
+library, `RegimeId` enum, and the minimal `IERC20Minimal` facade are
+reused inline and not counted as separate deployed sizes).
 
 The four `IYieldLeg` implementations are the actual yield venues the
 aggregator routes capital through: `KHYPELeg` wraps the kHYPE
