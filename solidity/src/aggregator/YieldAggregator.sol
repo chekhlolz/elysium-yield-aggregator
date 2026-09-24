@@ -56,12 +56,23 @@ contract YieldAggregator {
 
     // ---- Core state ----
     IERC20Minimal public immutable asset_;
-    IYieldLeg[4] public legs;
+    // Index 4 is the 5th leg (Liminal xHYPE), added by task A3.
+    // Existing 4-leg deployments keep it as `address(0)` — every
+    // code path that iterates legs[i] for i in [0,4) skips it
+    // cleanly when its weight is zero (the 4-leg constructor
+    // sets _xhypeWeight = 0 and legs[4] = address(0)).
+    IYieldLeg[5] public legs;
 
     mapping(address => uint256) public shareBalances;
     uint256 public totalShares;
     uint256 private _allocatedTotal;
+    // 4-leg weights are held for backwards compatibility. Consumers
+    // that call `weights()` (existing tests, older off-chain tooling)
+    // see the [spot, khype, perp, basis] tuple; the xHYPE weight is
+    // tracked separately in _xhypeWeight and is exposed via `weights5()`
+    // and `xhypeWeight()`.
     uint16[4] private _weights;
+    uint16 private _xhypeWeight;
 
     uint32 public timelockSeconds;
     address public keeper;
@@ -83,7 +94,7 @@ contract YieldAggregator {
     }
 
     struct PendingAllocation {
-        uint16[4] weights;
+        uint16[5] weights;
         uint64 executesAt;
         string reason;
     }
@@ -94,10 +105,11 @@ contract YieldAggregator {
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Deposit(address indexed caller, address indexed receiver, uint256 assets, uint256 shares);
     event Withdraw(address indexed caller, address indexed owner, address indexed receiver, uint256 assets, uint256 shares);
-    event AllocationRequested(bytes32 indexed allocationId, uint16[4] weights, string reason, uint64 executesAt);
-    event AllocationExecuted(bytes32 indexed allocationId, uint16[4] weights);
+    event AllocationRequested(bytes32 indexed allocationId, uint16[5] weights, string reason, uint64 executesAt);
+    event AllocationExecuted(bytes32 indexed allocationId, uint16[5] weights);
     event AllocationCancelled(bytes32 indexed allocationId);
     event Harvested(uint256 yieldUsd);
+    event XHYPELegSet(address indexed leg, uint16 xhypeWeightBps);
     event KeeperUpdated(address indexed newKeeper);
     event PausedUpdated(bool paused);
 
@@ -106,7 +118,21 @@ contract YieldAggregator {
     modifier onlyOwner()  { require(msg.sender == owner,  "not owner");  _; }
     modifier notPaused()  { require(!paused,               "paused");     _; }
 
-    // ---- Constructor ----
+    // ---- Constructors ----
+    //
+    // Solidity 0.8.26 does not permit constructor overloading. The
+    // aggregator keeps ONE constructor that takes the legacy 4-tuple
+    // so all existing keeper tests, deployments, and off-chain tooling
+    // continue to compile unchanged. Deployments that want xHYPE wire
+    // the 5th leg post-construction via `setXHYPELeg(leg, weightBps)`,
+    // which rotates `weightBps` out of the 4 existing legs and puts
+    // it into `_xhypeWeight` (so the 5-weight invariant holds).
+    //
+    // The 5-leg code paths (executePending, harvestFromAllLegs,
+    // _distribute, _redeem, totalLegValue, currentValueOfLeg,
+    // currentApyBps, _isPerpLeg) all iterate i in [0,5) with an
+    // `address(legs[i]) == address(0)` skip, so 4-leg deployments
+    // are a strict subset of 5-leg deployments.
     constructor(
         IERC20Minimal _asset,
         address _keeper,
@@ -124,6 +150,9 @@ contract YieldAggregator {
             "weights sum != 10000"
         );
         _weights = _initialWeights;
+        _xhypeWeight = 0;
+        // legs[4] stays at its default `address(0)` — no xHYPE venue
+        // is wired for a fresh deployment.
 
         for (uint i = 0; i < 4; i++) {
             require(address(_legsParams[i]) != address(0), "zero leg");
@@ -131,27 +160,106 @@ contract YieldAggregator {
         }
     }
 
+    /**
+     * Owner-gated wiring of the 5th leg (Liminal xHYPE) after
+     * construction. Rotates `weightBps` of allocation OUT of the
+     * 4 existing legs (pro-rata across the 4 legs, rounded down so
+     * `_weights[0..3] + _xhypeWeight == BPS_DENOM`) and INTO
+     * `_xhypeWeight`. `weightBps = 0` is a no-op.
+     *
+     * Setting `_legs[4] = address(0)` after a prior non-zero xHYPE
+     * weight reverts — governance must zero the weight first, then
+     * re-wire.
+     */
+    function setXHYPELeg(IYieldLeg leg, uint16 weightBps) external onlyOwner {
+        require(weightBps <= BPS_DENOM, "weightBps > 10000");
+        // Compute the pro-rata rotation from each of the 4 existing
+        // legs. We want sum of subtractions to equal weightBps
+        // exactly, so the largest remainder goes to whichever leg has
+        // the most weight (stable rule under tiebreaking).
+        uint256 sum = uint256(_weights[0]) + _weights[1] + _weights[2] + _weights[3];
+        require(sum + _xhypeWeight == BPS_DENOM, "weight invariant broken");
+        uint256 subtractions = 0;
+        uint256 totalSub = 0;
+        for (uint i = 0; i < 4; i++) {
+            uint256 take = (uint256(_weights[i]) * weightBps) / BPS_DENOM;
+            if (take > _weights[i]) take = _weights[i];
+            _weights[i] -= uint16(take);
+            totalSub += take;
+            subtractions += take;
+        }
+        // Round the residual up into _weights[1] (kHYPE) — xHYPE is
+        // a HYPE vehicle, so we prefer to draw the residual from kHYPE
+        // rather than the spot or perp legs.
+        uint256 residual = weightBps - subtractions;
+        if (residual > 0) {
+            // Take up to `residual` more from kHYPE (index 1) if
+            // possible; else from spot (index 0). If neither has room,
+            // we already drew the max and residual is 0 by arithmetic.
+            uint256 fromKhype = residual > _weights[1] ? _weights[1] : residual;
+            _weights[1] -= uint16(fromKhype);
+            residual -= fromKhype;
+            if (residual > 0) {
+                uint256 fromSpot = residual > _weights[0] ? _weights[0] : residual;
+                _weights[0] -= uint16(fromSpot);
+            }
+        }
+        _xhypeWeight = weightBps;
+        // Wire the leg address. If `weightBps == 0` and the caller
+        // passes address(0), the leg is unwired.
+        legs[4] = leg;
+        emit XHYPELegSet(address(leg), weightBps);
+    }
+
     // ---- Views ----
     function asset() external view returns (address) { return address(asset_); }
     function shares(address _owner) external view returns (uint256) { return shareBalances[_owner]; }
+    /// Legacy 4-leg view (spot, kHype, perp, basis). Backwards-compat
+    /// for existing tests and off-chain tooling that don't yet know
+    /// about xHYPE. Prefer `weights5()` for the full allocation.
     function weights() external view returns (uint16[4] memory) { return _weights; }
+    /// Full 5-leg view: [spot, kHype, perp, basis, xHype]. Sum is
+    /// always 10_000 bps (enforced by constructor + requestAllocation).
+    function weights5() external view returns (uint16[5] memory) {
+        return [_weights[0], _weights[1], _weights[2], _weights[3], _xhypeWeight];
+    }
+    /// Convenience accessor for the 5th leg weight. 0 when the
+    /// aggregator was deployed with the 4-leg constructor.
+    function xhypeWeight() external view returns (uint16) { return _xhypeWeight; }
     function legAt(uint256 i) external view returns (address) {
-        require(i < 4, "bad leg index");
+        require(i < 5, "bad leg index");
         return address(legs[i]);
     }
+    /// Legacy 4-address view. Backwards-compat; use `legsView5()` for
+    /// the full 5-tuple.
     function legsView() external view returns (address[4] memory) {
         address[4] memory out = [address(legs[0]), address(legs[1]), address(legs[2]), address(legs[3])];
         return out;
     }
+    function legsView5() external view returns (address[5] memory) {
+        address[5] memory out = [
+            address(legs[0]), address(legs[1]), address(legs[2]),
+            address(legs[3]), address(legs[4])
+        ];
+        return out;
+    }
 
     function currentValueOfLeg(uint256 i) public view returns (uint256) {
-        require(i < 4, "bad leg index");
+        require(i < 5, "bad leg index");
+        // Zero-address legs (from 4-leg deployments where index 4 is
+        // unwired) contribute 0 value. A direct `.currentValue()` on
+        // an EOA returns empty bytes, which would revert on decode —
+        // so we short-circuit here.
+        if (address(legs[i]) == address(0)) return 0;
         return legs[i].currentValue();
     }
 
     function totalLegValue() public view returns (uint256) {
         uint256 total = 0;
-        for (uint i = 0; i < 4; i++) total += legs[i].currentValue();
+        for (uint i = 0; i < 5; i++) {
+            if (address(legs[i]) == address(0)) continue;
+            total += legs[i].currentValue();
+        }
         return total;
     }
 
@@ -185,8 +293,15 @@ contract YieldAggregator {
 
     function currentApyBps() external view returns (uint256) {
         uint256 total = 0;
-        for (uint i = 0; i < 4; i++) total += legs[i].expectedApy() * _weights[i];
-        return total / BPS_DENOM;
+        uint256 denom = 0;
+        for (uint i = 0; i < 5; i++) {
+            if (address(legs[i]) == address(0)) continue;
+            uint256 w = (i < 4) ? _weights[i] : _xhypeWeight;
+            total += legs[i].expectedApy() * w;
+            denom += w;
+        }
+        if (denom == 0) return 0;
+        return total / denom;
     }
 
     // ---- ERC-4626 accounting ----
@@ -281,10 +396,42 @@ contract YieldAggregator {
     }
 
     // ---- Allocation control ----
+    /**
+     * Legacy 4-leg request. Existing keeper integrations continue to
+     * call this with a 4-tuple; the 5th weight (xHYPE) is left at its
+     * current value and the 4-tuple is validated against the LEGACY
+     * BPS budget: sum of new 4 weights + current xHYPE weight == 10000.
+     * This preserves backwards compatibility for keepers that don't
+     * know about xHYPE — they effectively rebalance within the
+     * "legacy 4-leg envelope" while xHYPE keeps its slot untouched.
+     */
     function requestAllocation(uint16[4] calldata newWeights, string calldata reason)
         external onlyKeeper returns (bytes32 allocationId)
     {
-        uint256 sum = uint256(newWeights[0]) + newWeights[1] + newWeights[2] + newWeights[3];
+        uint256 legacySum = uint256(newWeights[0]) + uint256(newWeights[1])
+                          + uint256(newWeights[2]) + uint256(newWeights[3]);
+        require(legacySum + _xhypeWeight == BPS_DENOM, "weights sum != 10000");
+        require(pendingAllocationId == bytes32(0), "pending exists");
+
+        uint64 executesAt = uint64(block.timestamp) + timelockSeconds;
+        uint16[5] memory full = [
+            newWeights[0], newWeights[1], newWeights[2], newWeights[3], _xhypeWeight
+        ];
+        bytes32 id = keccak256(abi.encodePacked(msg.sender, executesAt, full, block.number));
+        _pending = PendingAllocation({weights: full, executesAt: executesAt, reason: reason});
+        pendingAllocationId = id;
+
+        emit AllocationRequested(id, full, reason, executesAt);
+        return id;
+    }
+
+    /** 5-leg request: full allocation including xHYPE. */
+    function requestAllocation5(uint16[5] calldata newWeights, string calldata reason)
+        external onlyKeeper returns (bytes32 allocationId)
+    {
+        uint256 sum = uint256(newWeights[0]) + uint256(newWeights[1])
+                    + uint256(newWeights[2]) + uint256(newWeights[3])
+                    + uint256(newWeights[4]);
         require(sum == BPS_DENOM, "weights sum != 10000");
         require(pendingAllocationId == bytes32(0), "pending exists");
 
@@ -301,16 +448,24 @@ contract YieldAggregator {
         require(pendingAllocationId != bytes32(0), "nothing pending");
         require(block.timestamp >= _pending.executesAt, "not yet");
 
-        uint16[4] memory oldW = _weights;
-        _weights = _pending.weights;
+        uint16[5] memory oldW = [_weights[0], _weights[1], _weights[2], _weights[3], _xhypeWeight];
+        _weights = [_pending.weights[0], _pending.weights[1], _pending.weights[2], _pending.weights[3]];
+        _xhypeWeight = _pending.weights[4];
         bytes32 id = pendingAllocationId;
         pendingAllocationId = bytes32(0);
-        _pending = PendingAllocation({weights: [uint16(0),uint16(0),uint16(0),uint16(0)], executesAt: 0, reason: ""});
+        _pending = PendingAllocation({
+            weights: [uint16(0), uint16(0), uint16(0), uint16(0), uint16(0)],
+            executesAt: 0,
+            reason: ""
+        });
 
         uint256 total = totalAssets();
-        for (uint i = 0; i < 4; i++) {
-            uint256 oldTarget = (total * oldW[i]) / BPS_DENOM;
-            uint256 newTarget = (total * _weights[i]) / BPS_DENOM;
+        for (uint i = 0; i < 5; i++) {
+            if (address(legs[i]) == address(0)) continue;
+            uint256 w_old = oldW[i];
+            uint256 w_new = (i < 4) ? _weights[i] : _xhypeWeight;
+            uint256 oldTarget = (total * w_old) / BPS_DENOM;
+            uint256 newTarget = (total * w_new) / BPS_DENOM;
             if (newTarget > oldTarget) {
                 uint256 delta = newTarget - oldTarget;
                 asset_.safeTransfer(address(legs[i]), delta);
@@ -328,7 +483,7 @@ contract YieldAggregator {
                 _allocatedTotal = _allocatedTotal > reduced ? _allocatedTotal - reduced : 0;
             }
         }
-        emit AllocationExecuted(id, _weights);
+        emit AllocationExecuted(id, [_weights[0], _weights[1], _weights[2], _weights[3], _xhypeWeight]);
     }
 
     /**
@@ -348,15 +503,25 @@ contract YieldAggregator {
         require(msg.sender == owner || msg.sender == keeper,
                 "cancelPending: owner or keeper only");
         pendingAllocationId = bytes32(0);
-        _pending = PendingAllocation({weights: [uint16(0),uint16(0),uint16(0),uint16(0)], executesAt: 0, reason: ""});
+        _pending = PendingAllocation({
+            weights: [uint16(0), uint16(0), uint16(0), uint16(0), uint16(0)],
+            executesAt: 0,
+            reason: ""
+        });
         emit AllocationCancelled(allocationId);
     }
 
     // ---- Harvest all legs into vault cash. ----
     function harvestFromAllLegs() external onlyKeeper nonReentrant {
-        for (uint i = 0; i < 4; i++) legs[i].harvest();
+        for (uint i = 0; i < 5; i++) {
+            if (address(legs[i]) == address(0)) continue;
+            legs[i].harvest();
+        }
         uint256 newAlloc = 0;
-        for (uint i = 0; i < 4; i++) newAlloc += legs[i].currentValue();
+        for (uint i = 0; i < 5; i++) {
+            if (address(legs[i]) == address(0)) continue;
+            newAlloc += legs[i].currentValue();
+        }
         _allocatedTotal = newAlloc;
         emit Harvested(newAlloc);
     }
@@ -400,16 +565,24 @@ contract YieldAggregator {
             "stream-A: delegation expired"
         );
 
-        uint16[4] memory oldW = _weights;
-        _weights = _pending.weights;
+        uint16[5] memory oldW = [_weights[0], _weights[1], _weights[2], _weights[3], _xhypeWeight];
+        _weights = [_pending.weights[0], _pending.weights[1], _pending.weights[2], _pending.weights[3]];
+        _xhypeWeight = _pending.weights[4];
         bytes32 id = pendingAllocationId;
         pendingAllocationId = bytes32(0);
-        _pending = PendingAllocation({weights: [uint16(0),uint16(0),uint16(0),uint16(0)], executesAt: 0, reason: ""});
+        _pending = PendingAllocation({
+            weights: [uint16(0), uint16(0), uint16(0), uint16(0), uint16(0)],
+            executesAt: 0,
+            reason: ""
+        });
 
         uint256 total = totalAssets();
-        for (uint i = 0; i < 4; i++) {
-            uint256 oldTarget = (total * oldW[i]) / BPS_DENOM;
-            uint256 newTarget = (total * _weights[i]) / BPS_DENOM;
+        for (uint i = 0; i < 5; i++) {
+            if (address(legs[i]) == address(0)) continue;
+            uint256 w_old = oldW[i];
+            uint256 w_new = (i < 4) ? _weights[i] : _xhypeWeight;
+            uint256 oldTarget = (total * w_old) / BPS_DENOM;
+            uint256 newTarget = (total * w_new) / BPS_DENOM;
             if (newTarget > oldTarget) {
                 uint256 delta = newTarget - oldTarget;
                 if (_isPerpLeg(i)) {
@@ -421,7 +594,7 @@ contract YieldAggregator {
                     perpLeg.submitIntentFromStreamA(d, sig, delta);
                     _allocatedTotal += delta;
                 } else {
-                    // Staking leg: unchanged path.
+                    // Staking leg (KHYPE, Spot, xHYPE): unchanged path.
                     asset_.safeTransfer(address(legs[i]), delta);
                     legs[i].allocateTo(delta);
                     _allocatedTotal += delta;
@@ -442,7 +615,7 @@ contract YieldAggregator {
                 }
             }
         }
-        emit AllocationExecuted(id, _weights);
+        emit AllocationExecuted(id, [_weights[0], _weights[1], _weights[2], _weights[3], _xhypeWeight]);
     }
 
     /**
@@ -461,7 +634,8 @@ contract YieldAggregator {
             "stream-A: delegation expired"
         );
 
-        for (uint i = 0; i < 4; i++) {
+        for (uint i = 0; i < 5; i++) {
+            if (address(legs[i]) == address(0)) continue;
             if (_isPerpLeg(i)) {
                 IIntentSubmittingLeg perpLeg = IIntentSubmittingLeg(address(legs[i]));
                 perpLeg.harvestIntent(d, sig);
@@ -470,7 +644,10 @@ contract YieldAggregator {
             }
         }
         uint256 newAlloc = 0;
-        for (uint i = 0; i < 4; i++) newAlloc += legs[i].currentValue();
+        for (uint i = 0; i < 5; i++) {
+            if (address(legs[i]) == address(0)) continue;
+            newAlloc += legs[i].currentValue();
+        }
         _allocatedTotal = newAlloc;
         emit Harvested(newAlloc);
     }
@@ -521,8 +698,10 @@ contract YieldAggregator {
 
     // ---- Internal helpers ----
     function _distribute(uint256 assets) internal returns (uint256 distributed) {
-        for (uint i = 0; i < 4; i++) {
-            uint256 portion = (assets * _weights[i]) / BPS_DENOM;
+        for (uint i = 0; i < 5; i++) {
+            if (address(legs[i]) == address(0)) continue;
+            uint256 w = (i < 4) ? _weights[i] : _xhypeWeight;
+            uint256 portion = (assets * w) / BPS_DENOM;
             if (portion == 0) continue;
             asset_.safeTransfer(address(legs[i]), portion);
             uint256 allocated = legs[i].allocateTo(portion);
@@ -540,7 +719,8 @@ contract YieldAggregator {
         uint256 freeCash = asset_.balanceOf(address(this));
         if (freeCash < assets) {
             uint256 needed = assets - freeCash;
-            for (uint i = 0; i < 4 && needed > 0; i++) {
+            for (uint i = 0; i < 5 && needed > 0; i++) {
+                if (address(legs[i]) == address(0)) continue;
                 uint256 legVal = legs[i].currentValue();
                 uint256 take = needed > legVal ? legVal : needed;
                 if (take == 0) continue;

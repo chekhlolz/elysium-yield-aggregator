@@ -196,17 +196,94 @@ contract RegimeDetector {
         return RegimeId.FUNDING_WEAK;
     }
 
-    /** Allocation shift per regime, in basis points. */
+    /**
+     * Allocation shift per regime, in basis points.
+     *
+     * 4-leg (LEGACY) view kept for backwards compatibility with
+     * downstream tests and consumers that still reason about the
+     * spot / kHYPE / perp / basisHedge four-way split. The 5-leg
+     * allocation adds xHYPE as the fifth leg — see
+     * `weightsForRegime5` below.
+     *
+     * Under the 4-leg view, xHYPE weight is folded into kHYPE
+     * (which is correct because xHYPE is a strictly-better HYPE
+     * vehicle and shares the same "HYPE yield" bucket). The 5-leg
+     * split is the authoritative production allocation.
+     *
+     *   [spot, khype, perpFunding, basisHedge]
+     *   FUNDING_STRONG : [    0, 1000, 6000, 3000]  ← xHYPE folded in
+     *   FUNDING_WEAK   : [ 2000, 2000, 4000, 2000]
+     *   FUNDING_NEG    : [ 4000, 6000,    0,    0]
+     *   HIGH_VOL       : [ 5000, 5000,    0,    0]
+     *
+     * Note: the values here differ from the 5-leg totals only in that
+     * the kHYPE slot is the SUM of the kHYPE + xHYPE 5-leg weights.
+     */
     function weightsForRegime(uint8 regime) external pure returns (uint16[4] memory) {
-        // [spot, khype, perpFunding, basisHedge]
         if (regime == RegimeId.FUNDING_STRONG) {
-            return [uint16(0), uint16(1000), uint16(6000), uint16(3000)];
+            return [uint16(0),    uint16(1000), uint16(6000), uint16(3000)];
         } else if (regime == RegimeId.FUNDING_WEAK) {
             return [uint16(2000), uint16(2000), uint16(4000), uint16(2000)];
         } else if (regime == RegimeId.FUNDING_NEG) {
-            return [uint16(4000), uint16(6000), uint16(0), uint16(0)];
+            return [uint16(4000), uint16(6000), uint16(0),    uint16(0)];
         } else {
-            return [uint16(5000), uint16(5000), uint16(0), uint16(0)];
+            return [uint16(5000), uint16(5000), uint16(0),    uint16(0)];
         }
+    }
+
+    /**
+     * 5-leg allocation weights including xHYPE.
+     *
+     * Design rule (task A3):
+     *   - `xhypeWeight ≤ what kHYPE would have received in this regime`
+     *     (the "xHYPE first" migration rule: because xHYPE is a
+     *     strictly-better HYPE yield vehicle than kHYPE, the
+     *     aggregator drains kHYPE into xHYPE before rotating weight
+     *     into other buckets).
+     *   - All 5 weights sum to 10_000 bps.
+     *   - kHYPE's share shrinks by exactly the xHYPE weight per
+     *     regime (spot / perp / basisHedge are held at the values
+     *     that preserve each regime's original total). The kHype /
+     *     spot / perp / basisHedge RELATIVE ordering is preserved
+     *     from the 4-leg weights above; only kHYPE is diminished by
+     *     the migration amount.
+     *
+     *   index 0 : spot
+     *   index 1 : kHype
+     *   index 2 : perpFunding
+     *   index 3 : basisHedge
+     *   index 4 : xHype
+     *
+     *   FUNDING_STRONG : [   0,  400, 6000, 3000,  600]
+     *   FUNDING_WEAK   : [2000,  800, 4000, 2000, 1200]
+     *   FUNDING_NEG    : [4000, 2400,    0,    0, 3600]
+     *   HIGH_VOL       : [5000, 2000,    0,    0, 3000]
+     */
+    function weightsForRegime5(uint8 regime) external pure returns (uint16[5] memory) {
+        return _weightsForRegime5(regime);
+    }
+
+    function _weightsForRegime5(uint8 regime) internal pure returns (uint16[5] memory) {
+        if (regime == RegimeId.FUNDING_STRONG) {
+            return [uint16(0),    uint16(400),  uint16(6000), uint16(3000), uint16(600)];
+        } else if (regime == RegimeId.FUNDING_WEAK) {
+            return [uint16(2000), uint16(800),  uint16(4000), uint16(2000), uint16(1200)];
+        } else if (regime == RegimeId.FUNDING_NEG) {
+            return [uint16(4000), uint16(2400), uint16(0),    uint16(0),    uint16(3600)];
+        } else {
+            return [uint16(5000), uint16(2000), uint16(0),    uint16(0),    uint16(3000)];
+        }
+    }
+
+    /**
+     * Per-regime xHYPE weight in bps. Kept as a separate accessor so
+     * the aggregator (and off-chain tooling) can read the migration
+     * amount directly without parsing the full 5-tuple.
+     *
+     * Invariant: xHYPE_WEIGHT_BPS[regime] ≤ (kHYPE weight that would
+     * have been allocated in this regime, i.e. weightsForRegime(regime)[1]).
+     */
+    function XHYPE_WEIGHT_BPS(uint8 regime) external pure returns (uint16) {
+        return _weightsForRegime5(regime)[4];
     }
 }
