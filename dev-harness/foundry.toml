@@ -1,0 +1,31 @@
+[profile.default]
+# hypercore-dev-harness — standalone Foundry library for local HyperCore
+# precompile testing.
+#
+# Root: hypeback/dev-harness
+# Run:  forge test --root hypeback/dev-harness
+#
+# `libs = [".."]` makes Forge resolve `@forge-std` to hypeback/lib/forge-std
+# without needing a second checkout.
+
+src = "src"
+out = "out"
+test = "test"
+script = "scripts"
+libs = [".."]
+solc = "0.8.26"
+evm_version = "paris"
+optimizer = true
+optimizer_runs = 200
+
+remappings = [
+    "@forge-std/=../lib/forge-std/src/",
+    "@hypercore-dev-harness/=src/",
+    "@hypeback-sol/=../solidity/src/",
+]
+
+[profile.default.fuzz]
+runs = 256
+
+[profile.default.fmt]
+sort_imports = true

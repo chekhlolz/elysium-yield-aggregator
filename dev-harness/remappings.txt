@@ -1,0 +1,3 @@
+@forge-std/=../lib/forge-std/src/
+@hypercore-dev-harness/=src/
+@hypeback-sol/=../solidity/src/
