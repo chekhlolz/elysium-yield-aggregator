@@ -32,6 +32,16 @@ export {
 } from './keeper.js';
 export { MockVenue, type VenueSubmitResult } from './mock-venue.js';
 export {
+  MockElysiumCoreWriter,
+  type IVenueAdapter,
+  type MockVenueState,
+} from './venue-adapter.js';
+export {
+  KeeperDaemon,
+  DEFAULT_DAEMON_CONFIG,
+  type KeeperDaemonConfig,
+} from './daemon.js';
+export {
   EIP712_DOMAIN_NAME,
   EIP712_DOMAIN_VERSION,
   DELEGATION_FIELDS,
@@ -46,4 +56,15 @@ export {
   type Signature,
   type VenueConfig,
 } from './types.js';
+export {
+  type DaemonConfig,
+  type DaemonEvent,
+  type DaemonEventType,
+  type KeeperDaemonStats,
+  type PendingIntent,
+  type Side,
+  type SubmitResult,
+  type SubmittedTrade,
+  type Usd6,
+} from './daemon-types.js';
 export { maskAddress, maskPk, redactSecrets, isValidPrivateKey, isValidBytes32 } from './utils.js';

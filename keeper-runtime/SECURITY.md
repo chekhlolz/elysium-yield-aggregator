@@ -116,6 +116,82 @@ If you suspect compromise:
 - We do not accept pk from stdin or from an HTTP request at runtime.
   The pk is loaded once at boot from a single trusted source.
 
+## Daemon threat model
+
+The keeper daemon (`src/daemon.ts`) is the polling loop that ties the keeper
+wallet to a venue. It runs locally on the delegator's machine, not on-chain.
+The threat model below complements — and does not replace — the key-handling
+policy above.
+
+### Rate limit is defense-in-depth, not a substitute for revoke
+
+`MAX_TXS_PER_MINUTE` caps how many submissions the daemon emits per rolling
+60-second window. It is a *soft* control:
+
+- A compromised keeper can still submit up to the cap per minute.
+- The cap only bounds blast radius per unit of time; it does not bound
+  total notional.
+- If the keeper key is leaked, the attacker has the same cap the operator
+  does.
+
+The hard stop is `TradeOnlyAgent.revoke(keeper)`, which is called by the
+delegator (not the keeper) and immediately invalidates every outstanding
+delegation to that keeper. If you suspect compromise, do not rely on the
+rate limit; revoke.
+
+### Why nonce monotonicity matters
+
+The venue's used-notional book is keyed by `(delegator, keeper, nonce)`.
+A replayed delegation with a reused nonce looks like a re-delivery of an
+earlier submission and is silently accepted. The daemon therefore:
+
+- Starts the nonce at `config.nonceSeed` and increments by 1 for every
+  submission attempt (accepted or rejected, but not for skipped intents
+  that never reached the venue).
+- Persists the counter in-memory across `start()`/`stop()` cycles.
+- Exposes `getStats().lastNonce` so an operator can persist the counter
+  across a process restart (write it to a file, load it on boot).
+
+**Rule:** never restart the daemon with a lower `nonceSeed` than the last
+nonce it used. If you lose the counter, revoke the keeper and start fresh
+with a new keeper address — do not guess at where to resume.
+
+### TTL as a soft safety net vs revoke as a hard one
+
+The daemon stamps every delegation with `expiresAt = now + ttlSeconds`
+(default 300s). This is a soft ceiling: after `expiresAt`, the on-chain
+verifier rejects the delegation, so even a stolen signature becomes
+useless after five minutes.
+
+- **TTL** caps the window in which a stolen signature is useful.
+- **Revoke** caps the set of keepers that can sign at all, retroactively.
+
+TTL is cheap and automatic; revoke is manual and on-chain. Use TTL to
+shrink the blast radius of an incident that has already happened; use
+revoke to stop the bleeding.
+
+### "Daemon runs locally on the delegator's machine"
+
+The daemon process holds the keeper private key, signs delegations, and
+talks to the venue. A compromised host therefore compromises the keeper.
+The threat model is:
+
+- **Assume the daemon is not on the operator's laptop.** It runs on a
+  dedicated VM, container, or KMS-backed signer service.
+- **Assume any host that has the keeper pk is compromised until
+  proven otherwise.** The keeper does not distinguish between a
+  legitimate operator and a malware instance that loaded the pk.
+- **Compromised host = revoke immediately.** Do not wait for forensics.
+  Submit `revoke(keeper)` from the delegator's signer, deploy a new
+  keeper with a new pk, re-issue delegations.
+- **Rate limits and TTLs do not help against a compromised host.** The
+  attacker has the same budget as the operator, and can wait out the
+  TTL just as easily as the operator can.
+
+The only defense against a compromised host is to shrink the set of
+keepers that can act, which is what revoke does. Everything else is
+damage control.
+
 ## Local development
 
 The `.env.example` ships with the Hardhat dev key `0xac0974…62318`

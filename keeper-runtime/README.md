@@ -154,10 +154,39 @@ small and fast:
   `assetIds`, huge `assetIds`, and `expiresAt = 0` (the never-expires sentinel).
 - `test/keeper.test.ts` — wallet construction, address derivation, secret-masking
   invariants, and the `revoke` transaction builder (mocked provider, no network).
+- `test/daemon.test.ts` — polling loop lifecycle, monotonic nonces, sliding-window
+  rate limit (via a `Date.now` freeze helper — node:test ships no fake timers),
+  venue rejection and exception handling.
+- `test/venue-adapter.test.ts` — MockElysiumCoreWriter behaviour: FIFO queue,
+  used-notional accumulation, revoke, pre-populated state.
 
 There is deliberately no integration test against a live Anvil here; that arrives with
 the venue adapter work. The correctness contract that matters (bit-for-bit digest)
 is tested offline.
+
+## Running the daemon
+
+The daemon is the polling loop that signs delegations and submits them to a venue.
+It is fully offline — the mock venue adapter keeps all state in memory.
+
+```ts
+import { KeeperDaemon, KeeperWallet, MockElysiumCoreWriter } from 'keeper-runtime';
+
+const keeper = new KeeperWallet(process.env.KEEPER_PK!);
+const venue = new MockElysiumCoreWriter({
+  pendingIntents: [
+    { delegator: '0xf39F…2266', assetId: 1n, side: 'Long', size: 100n, notionalUsd: 1_000_000n },
+  ],
+});
+const daemon = new KeeperDaemon(keeper, venue, '0xf39F…2266', {
+  domain: { name: 'TradeOnlyAgent v1', version: '1', chainId: 999n, verifyingContract: AGENT },
+  watchIntervalMs: 1000, maxTxsPerMinute: 60, ttlSeconds: 300,
+  onEvent: (e) => console.log(e.type, e.nonce, e.result?.accepted),
+});
+await daemon.start();
+```
+
+See `SECURITY.md` for the daemon threat model.
 
 ## Roadmap
 
