@@ -2,6 +2,8 @@
 pragma solidity ^0.8.26;
 
 import "../interfaces/IYieldLeg.sol";
+import "../interfaces/IIntentSubmittingLeg.sol";
+import "../interfaces/ITradeOnlyAgent.sol";
 
 // ---- Minimal ERC-20 (only what the aggregator calls). ----
 interface IERC20Minimal {
@@ -357,6 +359,144 @@ contract YieldAggregator {
         for (uint i = 0; i < 4; i++) newAlloc += legs[i].currentValue();
         _allocatedTotal = newAlloc;
         emit Harvested(newAlloc);
+    }
+
+    /**
+     * KI-2b Phase 2 (DESIGN_KI2B_AGGREGATOR_STREAM_A.md §3-6): the
+     * stream-A rebalance path. The off-chain keeper signs a single
+     * delegation with `d.keeper = address(this)` (the aggregator) and
+     * passes `(d, sig)` here; the aggregator then forwards `(d, sig)`
+     * to each perp leg's stream-A entry points (`submitIntentFromStreamA`
+     * for new allocations, `reduceIntent` for pro-rata reductions).
+     * Staking legs (KHYPE, Spot) continue to use the legacy
+     * `allocateTo` / `reduceFrom` paths unchanged — they never touch
+     * the writer, so there is no signature to check.
+     *
+     * Access: `onlyKeeper` (same as `executePending`); the aggregator
+     * itself is the stream-A keeper named in `d.keeper`, so the
+     * delegator's revocation of `revoke(aggregator)` halts every
+     * stream-A delegation in one handle (FIX-21).
+     *
+     * Invariants enforced before any leg is touched (belt over the
+     * leg's own verifier call):
+     *   - Pending allocation exists and the timelock has elapsed.
+     *   - `d.keeper == address(this)` (stream-A, not stream-B).
+     *   - `d` is not expired (`expiresAt == 0` = never, `> 0` = ts).
+     *
+     * The EIP-712 signature is NOT re-verified here — the leg's own
+     * `isValidDelegation` call is authoritative and binds the
+     * signature to the writer call. Option C's duplicate verification
+     * is deferred (see DESIGN_KI2B_AGGREGATOR_STREAM_A.md §2 Option C).
+     */
+    function executePendingWithStreamA(
+        ITradeOnlyAgent.Delegation calldata d,
+        ITradeOnlyAgent.Signature calldata sig
+    ) external onlyKeeper nonReentrant {
+        require(pendingAllocationId != bytes32(0), "nothing pending");
+        require(block.timestamp >= _pending.executesAt, "not yet");
+        require(d.keeper == address(this), "stream-A: d.keeper != aggregator");
+        require(
+            d.expiresAt == 0 || block.timestamp <= d.expiresAt,
+            "stream-A: delegation expired"
+        );
+
+        uint16[4] memory oldW = _weights;
+        _weights = _pending.weights;
+        bytes32 id = pendingAllocationId;
+        pendingAllocationId = bytes32(0);
+        _pending = PendingAllocation({weights: [uint16(0),uint16(0),uint16(0),uint16(0)], executesAt: 0, reason: ""});
+
+        uint256 total = totalAssets();
+        for (uint i = 0; i < 4; i++) {
+            uint256 oldTarget = (total * oldW[i]) / BPS_DENOM;
+            uint256 newTarget = (total * _weights[i]) / BPS_DENOM;
+            if (newTarget > oldTarget) {
+                uint256 delta = newTarget - oldTarget;
+                if (_isPerpLeg(i)) {
+                    // Stream A: aggregator forwards (d, sig) to the leg's
+                    // submitIntentFromStreamA, which enforces the
+                    // per-order cap, verifies the signature, and calls
+                    // the writer.
+                    IIntentSubmittingLeg perpLeg = IIntentSubmittingLeg(address(legs[i]));
+                    perpLeg.submitIntentFromStreamA(d, sig, delta);
+                    _allocatedTotal += delta;
+                } else {
+                    // Staking leg: unchanged path.
+                    asset_.safeTransfer(address(legs[i]), delta);
+                    legs[i].allocateTo(delta);
+                    _allocatedTotal += delta;
+                }
+            } else if (oldTarget > newTarget) {
+                uint256 delta = oldTarget - newTarget;
+                if (_isPerpLeg(i)) {
+                    // Stream A reduce: closes `delta` of the leg's perp
+                    // notional under (d, sig), sweeps USDC back to the
+                    // aggregator, and sells the pro-rata HYPE cut on
+                    // the spot side through the router.
+                    IIntentSubmittingLeg perpLeg = IIntentSubmittingLeg(address(legs[i]));
+                    uint256 returned = perpLeg.reduceIntent(d, sig, delta);
+                    _allocatedTotal = _allocatedTotal > returned ? _allocatedTotal - returned : 0;
+                } else {
+                    uint256 reduced = legs[i].reduceFrom(delta);
+                    _allocatedTotal = _allocatedTotal > reduced ? _allocatedTotal - reduced : 0;
+                }
+            }
+        }
+        emit AllocationExecuted(id, _weights);
+    }
+
+    /**
+     * KI-2b Phase 2: stream-A harvest variant. Same as
+     * `harvestFromAllLegs` but routes perp-leg harvests through
+     * `leg.harvestIntent(d, sig)` with the aggregator's stream-A
+     * delegation. Staking legs continue to use the no-arg `harvest()`.
+     */
+    function harvestFromAllLegs(
+        ITradeOnlyAgent.Delegation calldata d,
+        ITradeOnlyAgent.Signature calldata sig
+    ) external onlyKeeper nonReentrant {
+        require(d.keeper == address(this), "stream-A: d.keeper != aggregator");
+        require(
+            d.expiresAt == 0 || block.timestamp <= d.expiresAt,
+            "stream-A: delegation expired"
+        );
+
+        for (uint i = 0; i < 4; i++) {
+            if (_isPerpLeg(i)) {
+                IIntentSubmittingLeg perpLeg = IIntentSubmittingLeg(address(legs[i]));
+                perpLeg.harvestIntent(d, sig);
+            } else {
+                legs[i].harvest();
+            }
+        }
+        uint256 newAlloc = 0;
+        for (uint i = 0; i < 4; i++) newAlloc += legs[i].currentValue();
+        _allocatedTotal = newAlloc;
+        emit Harvested(newAlloc);
+    }
+
+    /**
+     * Returns true if the leg at index `i` is a perp leg (i.e.
+     * implements the stream-A surface from IIntentSubmittingLeg).
+     * Uses EIP-165-style detection: perp legs have the `submittedIntents`
+     * mapping (a public mapping getter), so a staticcall to
+     * `submittedIntents(bytes32)` succeeds only on perp legs.
+     *
+     * This avoids the need for `type(I).is(address)` which is a
+     * Solidity 0.8.27+ feature not available in 0.8.26. The check is
+     * against a method that ONLY perp legs implement (staking legs
+     * never call the writer, so they have no intent-submission
+     * surface), so the detection is reliable.
+     */
+    function _isPerpLeg(uint256 i) internal view returns (bool) {
+        address legAddr = address(legs[i]);
+        if (legAddr.code.length == 0) return false;
+        bytes memory data = abi.encodeWithSelector(
+            bytes4(keccak256("submittedIntents(bytes32)")),
+            bytes32(0)
+        );
+        (bool ok, bytes memory ret) = legAddr.staticcall(data);
+        return ok && ret.length == 32;
     }
 
     // ---- Governance ----

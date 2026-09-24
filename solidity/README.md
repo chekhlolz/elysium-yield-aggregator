@@ -58,13 +58,13 @@ Fresh build stats (source of truth; regenerate with `python scripts/compile.py`)
 
 ```
 contract                  abi  deployed B  creation B
-YieldAggregator            46       11055       12227
+YieldAggregator            48       14413       15585
 TradeOnlyAgent              8        3103        3131
 RegimeDetector             13        2884        3160
 KHYPELeg                   28        7743        8443
 SpotStakingLeg             29        7767        8467
-PerpFundingLeg             32        7140        7775
-BasisHedgeLeg              33        6988        7576
+PerpFundingLeg             41       13035       13818
+BasisHedgeLeg              42       13023       13759
 SafeERC20                   0          85         135  (library)
 RegimeId                    0          85         135  (enum)
 IYieldAggregator           27           0           0
@@ -86,7 +86,7 @@ preview methods are required by ERC-4626).
 
 ## Key design decisions
 
-### YieldAggregator (12.2 KB creation bytecode, 11.1 KB deployed)
+### YieldAggregator (15.6 KB creation bytecode, 14.4 KB deployed)
 
 - **ERC-4626** canonical surface: `deposit` / `mint` / `withdraw` /
   `redeem` / `previewDeposit` / `previewMint` / `previewWithdraw` /

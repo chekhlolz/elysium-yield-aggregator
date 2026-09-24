@@ -4,6 +4,8 @@ pragma solidity ^0.8.26;
 import "@forge-std/Test.sol";
 import "../src/aggregator/YieldAggregator.sol";
 import "../src/interfaces/IYieldLeg.sol";
+import "../src/interfaces/IIntentSubmittingLeg.sol";
+import "../src/interfaces/ITradeOnlyAgent.sol";
 
 /// Minimal ERC-20 with mint for tests. Uses the aggregator's own local
 /// IERC20Minimal (defined inside YieldAggregator.sol) — the two compile
@@ -729,5 +731,359 @@ contract YieldAggregatorTest is Test {
         vm.prank(ALICE);
         vm.expectRevert("not owner");
         agg.setTimelock(3600);
+    }
+}
+
+/// KI-2b Phase 2: minimal stream-A mock perp leg for aggregator tests.
+/// Implements the full IIntentSubmittingLeg surface and exposes a
+/// `submittedIntents(bytes32)` mapping so the aggregator's `_isPerpLeg`
+/// staticcall probe identifies it as a perp leg. The mock gates its
+/// legacy allocateTo/reduceFrom/harvest on `devFallbackEnabled` (the
+/// KI-2b Phase 2 dev-fallback flag) to mirror the production perp legs.
+contract StreamAMockPerpLeg is IYieldLeg, IIntentSubmittingLeg {
+    IERC20Minimal public usdc;
+    address public aggregator;
+    address public mockOwner;
+    bool public devFallbackEnabled;
+
+    uint256 public totalAllocated;
+    uint256 public harvestCount;
+    uint256 public lastStreamAAllocate;
+    uint256 public lastStreamAReduce;
+
+    /// EIP-165 probe target for the aggregator's `_isPerpLeg`.
+    mapping(bytes32 => bool) public submittedIntents;
+
+    constructor(address _usdc, address _agg, address _own, bool _dev) {
+        usdc = IERC20Minimal(_usdc);
+        aggregator = _agg;
+        mockOwner = _own;
+        devFallbackEnabled = _dev;
+    }
+
+    function name() external pure returns (string memory) { return "StreamAMockPerpLeg"; }
+    function expectedApy() external pure returns (uint256) { return 1000; }
+    function apyHistory() external pure returns (uint256[] memory) { return new uint256[](0); }
+
+    function currentValue() external view returns (uint256) { return totalAllocated; }
+
+    // --- Legacy dev-fallback path (stream-B / pre-round-13) ---
+
+    function allocateTo(uint256 amount) external returns (uint256) {
+        require(msg.sender == mockOwner || msg.sender == aggregator, "owner or agg only");
+        require(devFallbackEnabled, "use submitIntentFromStreamA");
+        totalAllocated += amount;
+        return amount;
+    }
+
+    function reduceFrom(uint256 amount) external returns (uint256) {
+        require(msg.sender == mockOwner || msg.sender == aggregator, "owner or agg only");
+        require(devFallbackEnabled, "use reduceIntent");
+        if (amount <= totalAllocated) totalAllocated -= amount; else totalAllocated = 0;
+        return amount;
+    }
+
+    function harvest() external {
+        require(msg.sender == mockOwner || msg.sender == aggregator, "owner or agg only");
+        require(devFallbackEnabled, "use harvestIntent");
+        harvestCount += 1;
+    }
+
+    // --- Stream-A entry points (KI-2b Phase 2) ---
+
+    /// Validate the (d, sig) tuple. Order matters: check `sig.v` FIRST
+    /// so a bad-v case surfaces the "bad v" revert regardless of
+    /// keeper; the keeper check comes second so a wrong-keeper case
+    /// surfaces the keeper revert even when sig.v is otherwise valid.
+    function _checkStreamA(ITradeOnlyAgent.Delegation calldata d, ITradeOnlyAgent.Signature calldata sig) internal view {
+        require(sig.v == 27 || sig.v == 28, "stream-A: bad v");
+        require(d.keeper == aggregator, "stream-A: d.keeper != aggregator");
+        require(d.maxPerOrder > 0, "zero maxPerOrder");
+    }
+
+    /// Stream-A allocate. The aggregator's executePendingWithStreamA
+    /// routes here with `d.keeper == aggregator`.
+    function submitIntentFromStreamA(
+        ITradeOnlyAgent.Delegation calldata d,
+        ITradeOnlyAgent.Signature calldata sig,
+        uint256 amount
+    ) external returns (uint256) {
+        _checkStreamA(d, sig);
+        require(amount > 0, "zero");
+        require(amount <= d.maxPerOrder, "per-order cap");
+        lastStreamAAllocate = amount;
+        totalAllocated += amount;
+        submittedIntents[keccak256(abi.encode(d.keeper, d.nonce, d.salt))] = true;
+        return amount;
+    }
+
+    /// Stream-B allocate. The delegator routes here with
+    /// `d.keeper == address(this)` (the leg itself).
+    function submitIntent(
+        ITradeOnlyAgent.Delegation calldata d,
+        ITradeOnlyAgent.Signature calldata sig,
+        uint256 amount
+    ) external returns (uint256) {
+        require(d.keeper == address(this), "stream-B: d.keeper != this");
+        _checkStreamA(d, sig);
+        require(amount > 0, "zero");
+        require(amount <= d.maxPerOrder, "per-order cap");
+        lastStreamAAllocate = amount;
+        totalAllocated += amount;
+        submittedIntents[keccak256(abi.encode(d.keeper, d.nonce, d.salt))] = true;
+        return amount;
+    }
+
+    function reduceIntent(
+        ITradeOnlyAgent.Delegation calldata d,
+        ITradeOnlyAgent.Signature calldata sig,
+        uint256 amount
+    ) external returns (uint256) {
+        _checkStreamA(d, sig);
+        require(amount > 0, "zero");
+        require(amount <= d.maxPerOrder, "per-order cap");
+        require(amount <= totalAllocated, "overreduce");
+        lastStreamAReduce = amount;
+        if (amount <= totalAllocated) totalAllocated -= amount; else totalAllocated = 0;
+        submittedIntents[keccak256(abi.encode(d.keeper, d.nonce, d.salt))] = true;
+        return amount;
+    }
+
+    function harvestIntent(
+        ITradeOnlyAgent.Delegation calldata d,
+        ITradeOnlyAgent.Signature calldata sig
+    ) external {
+        _checkStreamA(d, sig);
+        harvestCount += 1;
+    }
+
+    /// Public wrapper over `_fallbackSig()` so tests can assert the
+    /// flag's effect without going through allocateTo bookkeeping.
+    function devFallbackSigV() external view returns (uint8) {
+        require(devFallbackEnabled, "use submitIntentFromStreamA");
+        return 27;
+    }
+
+    function _fallbackSig() internal view returns (ITradeOnlyAgent.Signature memory) {
+        require(devFallbackEnabled, "use submitIntentFromStreamA");
+        return ITradeOnlyAgent.Signature({ v: 27, r: bytes32(0), s: bytes32(0) });
+    }
+
+    function setDevFallbackEnabled(bool _b) external {
+        require(msg.sender == mockOwner, "owner only");
+        devFallbackEnabled = _b;
+    }
+    function setAggregator(address _a) external {
+        require(msg.sender == mockOwner, "owner only");
+        aggregator = _a;
+    }
+}
+
+/// KI-2b Phase 2: stream-A aggregator test base. Deploys an aggregator
+/// with 3 MockLegs (staking, slots 0-2) and 1 StreamAMockPerpLeg (perp,
+/// slot 3). The mock perp leg has `devFallbackEnabled = true` so the
+/// legacy allocateTo path used by `_distribute` (deposit) still works.
+abstract contract StreamABase is Test {
+    address internal constant OWNER    = address(0x1111);
+    address internal constant KEEPER   = address(0x2222);
+    address internal constant ALICE    = address(0x3333);
+    address internal constant DELEGATOR = address(0x5555);
+
+    MockUSDC internal usdc;
+    MockLeg[3] internal legacyLegs;
+    StreamAMockPerpLeg internal perpLeg;
+    YieldAggregator internal agg;
+
+    function setUpStreamA() internal {
+        vm.startPrank(OWNER);
+        usdc = new MockUSDC();
+        legacyLegs[0] = new MockLeg();
+        legacyLegs[1] = new MockLeg();
+        legacyLegs[2] = new MockLeg();
+        perpLeg = new StreamAMockPerpLeg(address(usdc), address(0), OWNER, true);
+        IYieldLeg[4] memory legI = [
+            IYieldLeg(legacyLegs[0]),
+            IYieldLeg(legacyLegs[1]),
+            IYieldLeg(legacyLegs[2]),
+            IYieldLeg(perpLeg)
+        ];
+        uint16[4] memory init = [uint16(2500), uint16(2500), uint16(2500), uint16(2500)];
+        agg = new YieldAggregator(usdc, KEEPER, legI, 1 hours, init);
+        vm.stopPrank();
+        vm.startPrank(address(agg));
+        legacyLegs[0].setUsdc(address(usdc));
+        legacyLegs[1].setUsdc(address(usdc));
+        legacyLegs[2].setUsdc(address(usdc));
+        vm.stopPrank();
+        vm.prank(OWNER);
+        perpLeg.setAggregator(address(agg));
+    }
+
+    function _streamADeleg() internal view returns (ITradeOnlyAgent.Delegation memory) {
+        return ITradeOnlyAgent.Delegation({
+            keeper: address(agg), assetIds: new uint256[](0),
+            maxNotional: type(uint256).max, maxPerOrder: type(uint256).max,
+            expiresAt: 0, nonce: 1, salt: bytes32(uint256(1))
+        });
+    }
+
+    function _streamADelegExpiresAt(uint64 _exp) internal view returns (ITradeOnlyAgent.Delegation memory) {
+        return ITradeOnlyAgent.Delegation({
+            keeper: address(agg), assetIds: new uint256[](0),
+            maxNotional: type(uint256).max, maxPerOrder: type(uint256).max,
+            expiresAt: _exp, nonce: 1, salt: bytes32(uint256(1))
+        });
+    }
+
+    function _badKeeperDeleg() internal pure returns (ITradeOnlyAgent.Delegation memory) {
+        return ITradeOnlyAgent.Delegation({
+            keeper: address(0xBAD), assetIds: new uint256[](0),
+            maxNotional: type(uint256).max, maxPerOrder: type(uint256).max,
+            expiresAt: 0, nonce: 1, salt: bytes32(uint256(1))
+        });
+    }
+
+    function _sig(uint8 _v) internal pure returns (ITradeOnlyAgent.Signature memory) {
+        return ITradeOnlyAgent.Signature({ v: _v, r: bytes32(uint256(27)), s: bytes32(uint256(28)) });
+    }
+}
+
+/// KI-2b Phase 2: 8 stream-A tests.
+contract StreamATests is StreamABase {
+    function setUp() public {
+        setUpStreamA();
+        usdc.mint(ALICE, 1_000_000 ether);
+        vm.prank(ALICE);
+        usdc.approve(address(agg), type(uint256).max);
+    }
+
+    /// Test 1: happy path. The aggregator forwards (d, sig) to the
+    /// mock perp leg's submitIntentFromStreamA with the correct delta.
+    /// After a 1000 ether deposit at the initial 25/25/25/25 weights,
+    /// each leg holds 250 ether. Rebasing to 20/20/20/40: leg 3's
+    /// target is 400, so the stream-A allocate delta is 150 ether.
+    /// Staking legs each shrink by 50; the mock's `totalAllocated`
+    /// reflects the request-based book, so each ends at 200.
+    function test_executePendingWithStreamA_routesThroughSubmitIntent() public {
+        usdc.mint(ALICE, 10_000 ether);
+        vm.prank(ALICE);
+        agg.deposit(1000 ether, ALICE);
+        uint16[4] memory w = [uint16(2000), uint16(2000), uint16(2000), uint16(4000)];
+        vm.prank(KEEPER);
+        agg.requestAllocation(w, "stream-A rebalance");
+        vm.warp(block.timestamp + 1 hours + 1);
+        ITradeOnlyAgent.Delegation memory d = _streamADeleg();
+        vm.prank(KEEPER);
+        agg.executePendingWithStreamA(d, _sig(27));
+        assertEq(perpLeg.lastStreamAAllocate(), 150 ether, "perp stream-A delta");
+        assertEq(legacyLegs[0].totalAllocated(), 200 ether, "leg0 legacy shrank");
+        assertEq(legacyLegs[1].totalAllocated(), 200 ether, "leg1 legacy shrank");
+        assertEq(legacyLegs[2].totalAllocated(), 200 ether, "leg2 legacy shrank");
+        assertEq(agg.pendingAllocationId(), bytes32(0), "pending cleared");
+        uint16[4] memory got = agg.weights();
+        assertEq(got[3], 4000, "weights[3] applied");
+    }
+
+    /// Test 2: guard rail — d.keeper != aggregator is rejected.
+    function test_executePendingWithStreamA_reverts_onWrongKeeper() public {
+        uint16[4] memory w = [uint16(2000), uint16(2000), uint16(2000), uint16(4000)];
+        vm.prank(KEEPER);
+        agg.requestAllocation(w, "wrong keeper");
+        vm.warp(block.timestamp + 1 hours + 1);
+        vm.prank(KEEPER);
+        vm.expectRevert("stream-A: d.keeper != aggregator");
+        agg.executePendingWithStreamA(_badKeeperDeleg(), _sig(27));
+    }
+
+    /// Test 3: guard rail — bad signature v is rejected by the leg's
+    /// stream-A entry point (the revert bubbles up from the leg).
+    /// The aggregator routes to the perp leg only after a deposit
+    /// gives the vault enough assets for the rebalance to produce a
+    /// non-zero delta — otherwise the aggregator's loop would skip
+    /// the perp leg entirely (no delta = no call).
+    function test_executePendingWithStreamA_reverts_onInvalidSig() public {
+        usdc.mint(ALICE, 10_000 ether);
+        vm.prank(ALICE);
+        agg.deposit(1000 ether, ALICE);
+        uint16[4] memory w = [uint16(2000), uint16(2000), uint16(2000), uint16(4000)];
+        vm.prank(KEEPER);
+        agg.requestAllocation(w, "bad sig");
+        vm.warp(block.timestamp + 1 hours + 1);
+        ITradeOnlyAgent.Delegation memory d = _streamADeleg();
+        vm.prank(KEEPER);
+        vm.expectRevert("stream-A: bad v");
+        agg.executePendingWithStreamA(d, _sig(99));
+    }
+
+    /// Test 4: guard rail — expired delegation is rejected by the
+    /// aggregator's belt-before-verify check.
+    function test_executePendingWithStreamA_reverts_whenDelegatorExpired() public {
+        uint16[4] memory w = [uint16(2000), uint16(2000), uint16(2000), uint16(4000)];
+        vm.prank(KEEPER);
+        agg.requestAllocation(w, "expired");
+        vm.warp(block.timestamp + 1 hours + 1);
+        ITradeOnlyAgent.Delegation memory d = _streamADelegExpiresAt(0x1);
+        vm.prank(KEEPER);
+        vm.expectRevert("stream-A: delegation expired");
+        agg.executePendingWithStreamA(d, _sig(27));
+    }
+
+    /// Test 5: boundary — delegation expires exactly at block.timestamp
+    /// and is still accepted (<=, not <).
+    function test_executePendingWithStreamA_succeeds_atExactExpiry() public {
+        vm.warp(100);
+        usdc.mint(ALICE, 10_000 ether);
+        vm.prank(ALICE);
+        agg.deposit(1000 ether, ALICE);
+        uint16[4] memory w = [uint16(2000), uint16(2000), uint16(2000), uint16(4000)];
+        vm.prank(KEEPER);
+        agg.requestAllocation(w, "at expiry");
+        vm.warp(4900); // executesAt = 100 + 1h = 4900
+        ITradeOnlyAgent.Delegation memory d = _streamADelegExpiresAt(4900);
+        vm.prank(KEEPER);
+        agg.executePendingWithStreamA(d, _sig(27));
+        // Perp leg got (4000 - 2500) / 10000 * 1000 ether = 150 ether.
+        assertEq(perpLeg.lastStreamAAllocate(), 150 ether, "perp stream-A delta at exact expiry");
+        assertEq(agg.pendingAllocationId(), bytes32(0), "pending cleared");
+    }
+
+    /// Test 6: harvestFromAllLegs(d, sig) routes perp-leg harvests
+    /// through harvestIntent(d, sig), staking legs through harvest().
+    function test_harvestFromAllLegsWithStreamA() public {
+        usdc.mint(ALICE, 10_000 ether);
+        vm.prank(ALICE);
+        agg.deposit(1000 ether, ALICE);
+        ITradeOnlyAgent.Delegation memory d = _streamADeleg();
+        vm.prank(KEEPER);
+        agg.harvestFromAllLegs(d, _sig(27));
+        assertEq(legacyLegs[0].harvestCount(), 1, "leg0 legacy harvest");
+        assertEq(legacyLegs[1].harvestCount(), 1, "leg1 legacy harvest");
+        assertEq(legacyLegs[2].harvestCount(), 1, "leg2 legacy harvest");
+        assertEq(perpLeg.harvestCount(), 1, "perp stream-A harvest");
+    }
+
+    /// Test 7: production mode — devFallbackEnabled == false makes the
+    /// legacy _fallbackSig path revert, so allocateTo is unreachable.
+    function test_fallbackSig_reverts_inProduction() public {
+        vm.prank(OWNER);
+        perpLeg.setDevFallbackEnabled(false);
+        vm.expectRevert("use submitIntentFromStreamA");
+        perpLeg.devFallbackSigV();
+        vm.prank(OWNER);
+        vm.expectRevert("use submitIntentFromStreamA");
+        perpLeg.allocateTo(100);
+    }
+
+    /// Test 8: dev mode — devFallbackEnabled == true keeps the legacy
+    /// _fallbackSig path alive for round-11 stream-B compatibility.
+    function test_fallbackSig_works_inDevMode() public {
+        vm.prank(OWNER);
+        perpLeg.setDevFallbackEnabled(true);
+        uint8 v = perpLeg.devFallbackSigV();
+        assertEq(v, 27, "dev fallback sig v");
+        vm.prank(OWNER);
+        uint256 out = perpLeg.allocateTo(500 ether);
+        assertEq(out, 500 ether, "legacy allocateTo returned amount");
+        assertEq(perpLeg.totalAllocated(), 500 ether, "legacy book");
     }
 }

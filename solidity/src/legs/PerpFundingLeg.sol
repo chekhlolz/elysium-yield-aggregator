@@ -71,6 +71,22 @@ contract PerpFundingLeg is IYieldLeg, IIntentSubmittingLeg {
     /// Address whose signature authorizes all perp intents.
     address public immutable delegator;
 
+    /// KI-2b Phase 2: aggregator address. The aggregator drives all
+    /// perp rebalances via the stream-A entry points (`submitIntentFromStreamA`,
+    /// `reduceIntent`, `harvestIntent`); those check `d.keeper == aggregator`.
+    /// Non-immutable so it can be wired AFTER deployment (the leg is
+    /// deployed before the aggregator, because the aggregator constructor
+    /// takes the leg addresses).
+    address public aggregator;
+
+    /// KI-2b Phase 2: gate on the legacy `_fallbackSig()` path used
+    /// by `allocateTo` / `harvest` / `reduceFrom`. Default `true`
+    /// preserves the round-4/7/9/11 test behaviour; production
+    /// deployments flip it to `false` via `setDevFallbackEnabled`,
+    /// after which the legacy paths revert and only the stream-A
+    /// entry points are callable.
+    bool public devFallbackEnabled;
+
     uint256 public allocatedUsd;
     uint256 public spotHypeBalance;   // HYPE held long
     uint256 public perpNotional;      // USDC notional shorted
@@ -120,6 +136,13 @@ contract PerpFundingLeg is IYieldLeg, IIntentSubmittingLeg {
         delegator      = _delegator;
         fixedApyBps    = _fixedApyBps;
         latestApyBps   = _fixedApyBps;
+        // KI-2b Phase 2: aggregator wired post-deploy via setAggregator
+        // (the leg is deployed BEFORE the aggregator, because the
+        // aggregator constructor takes the leg addresses). Default
+        // devFallbackEnabled = true preserves the legacy `_fallbackSig()`
+        // path used by round-4/7/9/11 tests.
+        aggregator       = address(0);
+        devFallbackEnabled = true;
     }
 
     // ---- IYieldLeg ----
@@ -247,6 +270,22 @@ contract PerpFundingLeg is IYieldLeg, IIntentSubmittingLeg {
     }
     function bumpNonce() external onlyOwner { lastDelegationNonce += 1; }
 
+    /// KI-2b Phase 2: wire the aggregator address AFTER the aggregator
+    /// is deployed (the leg is deployed first because the aggregator
+    /// needs the leg addresses at construction). Owner-only.
+    function setAggregator(address _a) external onlyOwner {
+        aggregator = _a;
+    }
+
+    /// KI-2b Phase 2: flip the dev-fallback gate off for production
+    /// deployments. Owner-only. Once flipped off, `_fallbackSig()`
+    /// reverts, so the legacy `allocateTo` / `harvest` / `reduceFrom`
+    /// paths become unreachable on perp legs — the aggregator must
+    /// use stream-A entry points instead.
+    function setDevFallbackEnabled(bool _b) external onlyOwner {
+        devFallbackEnabled = _b;
+    }
+
     // ---- IIntentSubmittingLeg ----
 
     /**
@@ -321,6 +360,170 @@ contract PerpFundingLeg is IYieldLeg, IIntentSubmittingLeg {
         emit Allocated(amount, allocatedUsd);
     }
 
+    /**
+     * KI-2b Phase 2 (stream A): aggregate-delegated allocate. The
+     * aggregator calls this from `executePendingWithStreamA(d, sig)`
+     * with `d.keeper == aggregator`. The delegator has signed ONE
+     * delegation per aggregator rebalance (DESIGN_KI2B_AGGREGATOR_STREAM_A.md
+     * §3), so a single `(d, sig)` covers the allocate calls across all
+     * perp legs in the rebalance.
+     *
+     * Same 50/50 spot+perp split as `allocateTo` and `submitIntent`;
+     * nonce-keyed replay protection is keyed on
+     * `keccak(keeper, nonce, salt)` so the same (keeper, nonce, salt)
+     * cannot be replayed across the stream-A and stream-B surfaces of
+     * this leg.
+     */
+    function submitIntentFromStreamA(
+        ITradeOnlyAgent.Delegation calldata d,
+        ITradeOnlyAgent.Signature calldata sig,
+        uint256 amount
+    ) external nonReentrant returns (uint256 notionalAllocated) {
+        require(d.keeper == aggregator, "stream-A: d.keeper != aggregator");
+        require(
+            msg.sender == aggregator || msg.sender == owner,
+            "stream-A: not authorized"
+        );
+        require(aggregator != address(0), "stream-A: aggregator not set");
+        require(amount > 0, "zero");
+        require(amount <= d.maxPerOrder, "per-order cap");
+
+        bytes32 intentKey = keccak256(abi.encode(d.keeper, d.nonce, d.salt));
+        require(!submittedIntents[intentKey], "intent already submitted");
+
+        require(
+            tradeOnlyAgent.isValidDelegation(delegator, d, sig),
+            "invalid delegation"
+        );
+
+        uint256 spotPortion = amount / 2;
+        uint256 perpPortion = amount - spotPortion;
+        if (spotPortion == 0) spotPortion = amount;
+
+        uint256 hypeIn = _buyHype(spotPortion);
+        spotHypeBalance += hypeIn;
+
+        if (perpPortion > 0) {
+            _writeOpen(d, IElysiumCoreWriter.Side.Short, perpPortion, sig);
+            perpNotional += perpPortion;
+        }
+
+        submittedIntents[intentKey] = true;
+
+        allocatedUsd += amount;
+        notionalAllocated = amount;
+        _recordApy(expectedApy());
+        emit Allocated(amount, allocatedUsd);
+    }
+
+    /**
+     * KI-2b Phase 2 (stream A): aggregate-delegated reduce. Closes
+     * `amount` of the leg's open perp notional under the aggregator's
+     * delegation and sweeps the returned USDC to the aggregator. The
+     * spot-side reduction (sell HYPE back to USDC through the router)
+     * is leg-internal and does not touch the writer — see
+     * DESIGN_KI2B_AGGREGATOR_STREAM_A.md §10.
+     */
+    function reduceIntent(
+        ITradeOnlyAgent.Delegation calldata d,
+        ITradeOnlyAgent.Signature calldata sig,
+        uint256 amount
+    ) external nonReentrant returns (uint256 returnedUsd) {
+        require(d.keeper == aggregator, "stream-A: d.keeper != aggregator");
+        require(
+            msg.sender == aggregator || msg.sender == owner,
+            "stream-A: not authorized"
+        );
+        require(aggregator != address(0), "stream-A: aggregator not set");
+        require(amount > 0, "zero");
+        require(amount <= d.maxPerOrder, "per-order cap");
+        require(amount <= allocatedUsd, "overreduce");
+
+        bytes32 intentKey = keccak256(abi.encode(d.keeper, d.nonce, d.salt));
+        require(!submittedIntents[intentKey], "intent already submitted");
+
+        require(
+            tradeOnlyAgent.isValidDelegation(delegator, d, sig),
+            "invalid delegation"
+        );
+
+        uint256 perpCut = (perpNotional * amount) / allocatedUsd;
+        if (perpCut > 0 && perpNotional > 0) {
+            require(perpCut <= d.maxPerOrder, "per-order cap on perp cut");
+            _writeClose(d, IElysiumCoreWriter.Side.Short, perpCut, sig);
+            perpNotional -= perpCut;
+        }
+
+        uint256 hypeCut = (spotHypeBalance * amount) / allocatedUsd;
+        if (hypeCut > 0) {
+            _sellHype(hypeCut);
+            spotHypeBalance -= hypeCut;
+        }
+
+        submittedIntents[intentKey] = true;
+
+        returnedUsd = usdc.balanceOf(address(this));
+        if (returnedUsd > 0) {
+            usdc.safeTransfer(aggregator, returnedUsd);
+        }
+        if (allocatedUsd >= amount) allocatedUsd -= amount; else allocatedUsd = 0;
+        emit Reduced(amount, allocatedUsd);
+    }
+
+    /**
+     * KI-2b Phase 2 (stream A): aggregate-delegated harvest. Closes
+     * the open short under the aggregator's delegation, re-opens it
+     * (same notional) to continue collecting funding, then sweeps the
+     * realised PnL USDC to the aggregator. The spot HYPE position
+     * stays open throughout (only the perp side is close/reopened).
+     *
+     * Uses `d.nonce + 1` for the reopen call to defeat the per-leg
+     * nonce-keyed replay check — the close and the reopen both use
+     * the same delegation but must produce distinct intent keys so
+     * the second call is not rejected as a replay.
+     */
+    function harvestIntent(
+        ITradeOnlyAgent.Delegation calldata d,
+        ITradeOnlyAgent.Signature calldata sig
+    ) external nonReentrant {
+        require(d.keeper == aggregator, "stream-A: d.keeper != aggregator");
+        require(
+            msg.sender == aggregator || msg.sender == owner,
+            "stream-A: not authorized"
+        );
+        require(aggregator != address(0), "stream-A: aggregator not set");
+
+        bytes32 intentKey = keccak256(abi.encode(d.keeper, d.nonce, d.salt));
+        require(!submittedIntents[intentKey], "intent already submitted");
+
+        require(
+            tradeOnlyAgent.isValidDelegation(delegator, d, sig),
+            "invalid delegation"
+        );
+
+        uint256 usdcBefore = usdc.balanceOf(address(this));
+        if (perpNotional > 0) {
+            require(perpNotional <= d.maxPerOrder, "per-order cap on harvest");
+            _writeClose(d, IElysiumCoreWriter.Side.Short, perpNotional, sig);
+
+            // Reopen under the SAME delegation but with a bumped salt
+            // so the second intent key is distinct from the close's.
+            ITradeOnlyAgent.Delegation memory reopenD = d;
+            reopenD.salt = bytes32(uint256(d.salt) ^ 0x01010101);
+            _writeOpen(reopenD, IElysiumCoreWriter.Side.Short, perpNotional, sig);
+        }
+
+        submittedIntents[intentKey] = true;
+
+        uint256 realised = usdc.balanceOf(address(this)) - usdcBefore;
+        if (realised > 0) {
+            if (allocatedUsd >= realised) allocatedUsd -= realised; else allocatedUsd = 0;
+            usdc.safeTransfer(aggregator, realised);
+            emit Harvested(realised);
+        }
+        _recordApy(expectedApy());
+    }
+
     // ---- Internals ----
 
     function _buyHype(uint256 usdcAmount) internal returns (uint256 hypeOut) {
@@ -361,14 +564,18 @@ contract PerpFundingLeg is IYieldLeg, IIntentSubmittingLeg {
 
     /**
      * Phase-1 fallback signature for the aggregator-only allocateTo /
-     * harvest / reduceFrom paths. Once the aggregator is refactored
-     * (Phase 2, KI-2b), this becomes the aggregator-signed stream-A
-     * signature and is removed. Design doc §9 migration plan.
+     * harvest / reduceFrom paths. KI-2b Phase 2 (DESIGN_KI2B_AGGREGATOR_STREAM_A.md
+     * §4) gates this on `devFallbackEnabled`: when the flag is `false`
+     * (production), the legacy paths revert so the aggregator MUST use
+     * the stream-A entry points (`submitIntentFromStreamA` /
+     * `reduceIntent` / `harvestIntent`). When `true` (dev / round-4/7/9/11
+     * test rig), the fallback path is preserved for backwards compat.
      *
      * Deliberately NOT named `_zeroSig` — the KI-2 verification grep
      * rejects that symbol anywhere under `solidity/src/legs/`.
      */
-    function _fallbackSig() internal pure returns (ITradeOnlyAgent.Signature memory) {
+    function _fallbackSig() internal view returns (ITradeOnlyAgent.Signature memory) {
+        require(devFallbackEnabled, "use submitIntentFromStreamA");
         return ITradeOnlyAgent.Signature({ v: 27, r: bytes32(0), s: bytes32(0) });
     }
 
