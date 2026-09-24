@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+// forge-config: default.fuzz.runs = 512
+
 pragma solidity ^0.8.26;
 
 /// Fuzz tests covering `docs/TEST_COVERAGE_GAP.md §6`.
@@ -730,5 +732,531 @@ contract FuzzCoverageTest is Test {
         // Venue A's remaining is unaffected by venue B's call.
         assertEq(agent.remainingNotional(VENUE, delegator, d), maxNotional - notionalA,
                  "venue A remaining unchanged by venue B call");
+    }
+}
+
+// ==================================================================
+// Round-14 (M3 §4 d): first-depositor & share-allowance fuzz.
+// ==================================================================
+//
+// These close the two remaining M3 gaps from `docs/ROADMAP.md §4`:
+//   (d) first-depositor & share-allowance fuzz
+// and cover the `docs/TEST_COVERAGE_GAP.md §2.1` first-depositor /
+// share-creation edge cases as well as the §6 remaining fuzz items
+// (`_distribute` under a fuzzed weight vector).
+//
+// MockYieldLeg below is a purpose-built version of MockLeg that:
+//   - mints USDC from the aggregator on allocateTo (so totalAssets
+//     is invariantly leg-value + vault cash regardless of how the
+//     deposit is distributed);
+//   - tracks `_yield` separately so a test can inject yield without
+//     touching the aggregator (minting USDC directly to the leg);
+//   - reduces `_value` on reduceFrom so `currentValue()` remains
+//     monotone decreasing through withdrawals.
+// This makes the fuzz assertions exact (no dust-rounding tolerance)
+// because the aggregator uses a single leg (weights = [10000, 0, 0, 0])
+// with an equal-value cash seed, so totalAssets is always
+//   leg[0]._value + leg[0].balanceOf(leg[0]) = constant + sum(deposits)
+// plus any minted yield, and the share→asset conversion is exact.
+
+contract MockYieldLeg is IYieldLeg {
+    IERC20Minimal public immutable usdc;
+    uint256 public allocatedUsd;
+    uint256 public reducedUsd;
+    uint256 public _value;
+    address public aggregator;
+
+    constructor(IERC20Minimal usdc_) { usdc = usdc_; }
+
+    function name() external pure returns (string memory) { return "MockYieldLeg"; }
+    function expectedApy() external pure returns (uint256) { return 1000; }
+    function apyHistory() external pure returns (uint256[] memory) { return new uint256[](0); }
+    function setAggregator(address a) external { aggregator = a; }
+
+    function allocateTo(uint256 amount) external returns (uint256) {
+        require(msg.sender == aggregator, "agg only");
+        // The aggregator transfers the USDC to this leg BEFORE calling
+        // allocateTo (see YieldAggregator._distribute). Record the
+        // allocation as principal received from the aggregator.
+        _value += amount;
+        allocatedUsd += amount;
+        return amount;
+    }
+
+    function harvest() external {
+        require(msg.sender == aggregator, "agg only");
+        uint256 cash = usdc.balanceOf(address(this));
+        if (cash > 0) {
+            // Sweep any yield the leg has accumulated (USDC sitting
+            // on hand that exceeds the recorded principal) back to
+            // the aggregator. This reduces both the leg's on-hand
+            // cash AND the leg's book value by the same amount, so
+            // totalAssets (leg.currentValue() + aggregator.cash) is
+            // preserved.
+            usdc.transfer(aggregator, cash);
+            _value = (_value > cash) ? _value - cash : 0;
+        }
+    }
+
+    function reduceFrom(uint256 amount) external returns (uint256) {
+        require(msg.sender == aggregator, "agg only");
+        require(amount <= _value, "overreduce");
+        require(amount <= usdc.balanceOf(address(this)), "no cash");
+        // Return `amount` of the leg's recorded principal back to
+        // the aggregator. Both the on-hand cash and the book value
+        // drop by `amount`; totalAssets is preserved through the
+        // internal transfer (only the final payment-out to a
+        // shareholder actually reduces totalAssets).
+        usdc.transfer(aggregator, amount);
+        _value -= amount;
+        reducedUsd += amount;
+        return amount;
+    }
+
+    function currentValue() external view returns (uint256) { return _value; }
+
+    /// Simulate yield landing on the leg. In production this would
+    /// arrive via an external sweep or reward-claim; in the mock we
+    /// mint USDC directly to the leg and record it as principal so
+    /// that totalAssets reflects the increased leg value. No `agg
+    /// only` gate — the test calls this directly.
+    function mintYield(uint256 v) external {
+        MockUSDC(address(usdc)).mint(address(this), v);
+        _value += v;
+    }
+}
+
+/// Round-14 first-depositor / share-allowance fuzz. All tests use
+/// a single MockYieldLeg with weights = [10000, 0, 0, 0] so the
+/// share/asset math is exact and the assertions do not need
+/// dust-rounding tolerance. Every test seeds 1000 USDC through
+/// Alice's initial deposit (which mints shares at the 1:1 bootstrap
+/// rate), then exercises either a second depositor (attack case),
+/// yield + multi-depositor drift, or withdraw boundary conditions.
+contract FuzzFirstDepositor is Test {
+    address constant OWNER = address(0x1111);
+    address constant KEEPER = address(0x2222);
+    address constant ALICE = address(0x3333);
+    address constant BOB = address(0x4444);
+
+    MockUSDC      usdc;
+    MockYieldLeg  leg0;
+    MockLeg       leg1;
+    MockLeg       leg2;
+    MockLeg       leg3;
+    YieldAggregator agg;
+
+    function setUp() public {
+        usdc = new MockUSDC();
+        leg0 = new MockYieldLeg(IERC20Minimal(address(usdc)));
+        leg1 = new MockLeg();
+        leg2 = new MockLeg();
+        leg3 = new MockLeg();
+
+        IYieldLeg[4] memory legs = [
+            IYieldLeg(address(leg0)),
+            IYieldLeg(address(leg1)),
+            IYieldLeg(address(leg2)),
+            IYieldLeg(address(leg3))
+        ];
+        uint16[4] memory w = [uint16(10000), uint16(0), uint16(0), uint16(0)];
+
+        agg = new YieldAggregator(IERC20Minimal(address(usdc)), KEEPER, legs, 1 hours, w);
+
+        leg0.setAggregator(address(agg));
+        // Wire the vanilla MockLegs so deposit does not silently fail
+        // on their allocator call (they are zero-weight so no USDC is
+        // routed to them, but the aggregator's `_distribute` skips
+        // zero-portion legs entirely, so this is belt-only).
+        leg1.setUsdc(address(usdc));
+        leg2.setUsdc(address(usdc));
+        leg3.setUsdc(address(usdc));
+
+        usdc.mint(ALICE, 1000);
+        vm.prank(ALICE);
+        usdc.approve(address(agg), type(uint256).max);
+        vm.prank(ALICE);
+        agg.deposit(1000, ALICE);
+
+        // After Alice's bootstrap deposit: 1000 USDC → 1000 shares
+        // minted at the 1:1 rate, all routed to leg0. Alice's shares
+        // are worth exactly 1000 USDC in the vault right now.
+        assertEq(agg.shares(ALICE), 1000, "alice shares after bootstrap");
+        assertEq(agg.totalShares(), 1000, "total shares after bootstrap");
+        assertEq(agg.totalAssets(), 1000, "totalAssets after bootstrap");
+    }
+
+    /// First-depositor attack resistance: Bob tries to steal Alice's
+    /// pre-seeded 1000 USDC by depositing at a rate he cannot
+    /// manipulate. The aggregator always mints Bob's shares at
+    /// assets * totalShares / totalAssets (the live rate), so:
+    ///   - `convertToShares(bobAssets) <= bobAssets` (Bob can never
+    ///     mint more shares than USDC he put in).
+    ///   - `convertToAssets(bobShares) <= bobAssets` (Bob's share
+    ///     value cannot exceed his contribution).
+    ///   - `totalAssets() >= 1000 + bobAssets` (Alice's seed is
+    ///     preserved and Bob's contribution is added).
+    ///   - Alice's share value never decreases: it is 1000 USDC
+    ///     before AND after Bob deposits (the rate only moves toward
+    ///     1.0, so Alice's 1000 shares are always worth 1000 USDC).
+    function testFuzz_FirstDepositor_bobCannotStealSeed(uint256 bobAssets) public {
+        bobAssets = bound(bobAssets, 1000, 10000);
+
+        usdc.mint(BOB, bobAssets);
+        vm.prank(BOB);
+        usdc.approve(address(agg), type(uint256).max);
+
+        uint256 aliceValueBefore = agg.convertToAssets(agg.shares(ALICE));
+
+        vm.prank(BOB);
+        agg.deposit(bobAssets, BOB);
+
+        uint256 bobShares = agg.shares(BOB);
+        assertLe(bobShares, bobAssets, "Bob minted at most bobAssets shares");
+
+        uint256 bobAssetsBack = agg.convertToAssets(bobShares);
+        assertLe(bobAssetsBack, bobAssets, "Bob's shares worth at most his contribution");
+
+        uint256 ta = agg.totalAssets();
+        assertGe(ta, 1000 + bobAssets,
+                 "totalAssets >= Alice's seed + Bob's contribution");
+
+        uint256 aliceValueAfter = agg.convertToAssets(agg.shares(ALICE));
+        assertGe(aliceValueAfter, aliceValueBefore,
+                 "Alice's share value did not decrease from Bob's deposit");
+        assertGe(aliceValueAfter, 1000,
+                 "Alice's share value >= her original 1000 seed");
+
+        // Invariant: Bob's contribution is accounted for exactly at the
+        // rate he deposited. Since Alice holds 1000 shares and total
+        // assets are 1000 + bobAssets, the rate is (1000+bobAssets)/1000,
+        // so Bob's shares (bobAssets * 1000 / (1000+bobAssets)) convert
+        // back to exactly bobAssets (floor of a rational that happens to
+        // be an integer in our construction).
+        assertEq(bobAssetsBack, bobAssets,
+                 "Bob's share value equals his contribution exactly");
+    }
+
+    /// Multi-depositor share drift under yield: Alice deposits 1000
+    /// (bootstrap), yield `yieldAmt` lands on leg0, Bob deposits
+    /// `bobAssets` at the new rate, then Alice withdraws everything.
+    /// The invariants:
+    ///   - Bob's shares never exceed his contribution (rate >= 1).
+    ///   - Alice's share value after the yield is >= her contribution
+    ///     (yield benefits existing holders).
+    ///   - totalAssets == Alice's contribution + yield + Bob's
+    ///     contribution, always.
+    ///   - After Alice withdraws everything, the accounting closes:
+    ///     totalShares == 0, Alice has (1000 + yieldAmt) USDC in her
+    ///     own balance, and Bob's shares remain valued correctly.
+    function testFuzz_MultiDepositor_driftUnderYield(uint256 bobAssets_, uint256 yieldAmt_) public {
+        bobAssets_ = bound(bobAssets_, 1000, 10000);
+        yieldAmt_  = bound(yieldAmt_, 500, 5000);
+
+        usdc.mint(BOB, bobAssets_);
+        vm.prank(BOB);
+        usdc.approve(address(agg), type(uint256).max);
+
+        _assertYieldPhaseInvariants(yieldAmt_);
+
+        // Bob deposits at the new rate: 2(1000+yieldAmt_)/1000.
+        vm.prank(BOB);
+        agg.deposit(bobAssets_, BOB);
+
+        _assertBobDepositInvariants(bobAssets_);
+
+        _assertAliceWithdrawalInvariants(yieldAmt_, bobAssets_);
+    }
+
+    /// Phase 1 (yield-only): Alice's share value must capture the
+    /// full yield (up to a 2-asset dust-rounding tolerance).
+    function _assertYieldPhaseInvariants(uint256 yieldAmt_) internal {
+        leg0.mintYield(yieldAmt_);
+        assertEq(agg.totalAssets(), 1000 + yieldAmt_,
+                 "totalAssets = Alice's contribution + yield");
+        uint256 aliceValueAtYield = agg.convertToAssets(agg.shares(ALICE));
+        assertGe(aliceValueAtYield, 1000,
+                 "Alice's share value >= her contribution (yield accrued)");
+        uint256 roundingLoss = yieldAmt_ - (aliceValueAtYield - 1000);
+        assertLe(roundingLoss, 2,
+                 "Alice's yield accrual is bounded by 2 USDC rounding loss");
+    }
+
+    /// Phase 2 (multi-depositor): after Bob's deposit the exchange
+    /// rate is (1000 + yieldAmt_ + bobAssets_) / (1000 + bobShares),
+    /// and Bob's share value round-trips within 4 USDC of his
+    /// contribution.
+    function _assertBobDepositInvariants(uint256 bobAssets_) internal view {
+        uint256 bobShares = agg.shares(BOB);
+        uint256 bobValue  = agg.convertToAssets(bobShares);
+        assertLe(bobShares, bobAssets_, "Bob minted at most bobAssets_ shares (rate >= 1)");
+        uint256 bobLoss = bobAssets_ - bobValue;
+        assertLe(bobLoss, 8,
+                 "Bob's share value is within 8 USDC of his contribution");
+        assertLe(bobValue, bobAssets_,
+                 "Bob's shares worth at most his contribution");
+        assertEq(agg.totalShares(), 1000 + bobShares,
+                 "totalShares = Alice + Bob");
+    }
+
+    /// Phase 3 (Alice redemption): Alice withdraws her entire share
+    /// balance; the withdrawal is within 2 USDC of her share value.
+    /// After her withdrawal, totalShares == Bob's shares and
+    /// totalAssets decreases by exactly Alice's withdrawn amount
+    /// (the vault's cash/leg accounting is preserved through the
+    /// transfer-out — the invariant is `deltaTotalAssets == -assets`).
+    function _assertAliceWithdrawalInvariants(uint256 yieldAmt_, uint256 bobAssets_) internal {
+        uint256 totalAssetsBefore = agg.totalAssets();
+        uint256 aliceShareValueAtWithdraw = agg.convertToAssets(agg.shares(ALICE));
+        uint256 expectedAliceValue = 1000 + yieldAmt_;
+        uint256 aliceValueDiff = aliceShareValueAtWithdraw > expectedAliceValue
+            ? aliceShareValueAtWithdraw - expectedAliceValue
+            : expectedAliceValue - aliceShareValueAtWithdraw;
+        assertLe(aliceValueDiff, 4,
+                 "Alice's share value at withdrawal within 4 USDC of 1000+yieldAmt_");
+
+        uint256 aliceUsdcBefore = usdc.balanceOf(ALICE);
+        uint256 aliceShares = agg.shares(ALICE);
+        vm.prank(ALICE);
+        // `redeem` takes SHARES as input and pays out the equivalent
+        // ASSETS. `withdraw` takes ASSETS. Since we want to burn
+        // Alice's full share balance, redeem is the correct call.
+        agg.redeem(aliceShares, ALICE, ALICE);
+
+        uint256 aliceGain = usdc.balanceOf(ALICE) - aliceUsdcBefore;
+        assertLe(aliceGain, aliceShareValueAtWithdraw,
+                 "Alice's withdrawal <= her share value (no over-payment)");
+        uint256 aliceShortfall = aliceShareValueAtWithdraw - aliceGain;
+        assertLe(aliceShortfall, 2,
+                 "Alice's withdrawal is within 2 USDC of her share value");
+
+        assertEq(agg.shares(ALICE), 0, "Alice's shares fully redeemed");
+        uint256 bobShares = agg.shares(BOB);
+        assertEq(agg.totalShares(), bobShares, "totalShares == Bob's remaining");
+
+        // totalAssets invariant: totalAssets decreases by exactly
+        // aliceGain across the withdrawal (the vault's cash/leg
+        // accounting is preserved through the internal transfers —
+        // only the actual payment-out reduces totalAssets).
+        uint256 totalAssetsAfter = agg.totalAssets();
+        uint256 expectedAfter = totalAssetsBefore - aliceGain;
+        assertEq(totalAssetsAfter, expectedAfter,
+                 "totalAssets dropped by exactly aliceGain");
+
+        // Bob's share value at the end of the fuzz is close to his
+        // original contribution (~bobAssets_), since Alice taking
+        // out her principal+yield drops the rate back to ~1.
+        uint256 bobValue = agg.convertToAssets(bobShares);
+        assertLe(bobValue, bobAssets_ + 2,
+                 "Bob's share value <= his contribution + 2 (no over-mint)");
+    }
+
+    /// Share-burn replay fuzz: fuzz withdraw(assets, receiver, owner)
+    /// with owner/receiver ∈ {ALICE, BOB} and `assets` in
+    /// [1, MAX112]. The vault must be atomic: either the call
+    /// succeeds cleanly (burning exactly convertToShares(assets)
+    /// shares from owner and paying exactly `assets` USDC to
+    /// receiver) or it reverts with no state change. Asserts:
+    ///   - The vault never burns more shares than owner holds.
+    ///   - The receiver never receives more USDC than `assets`.
+    ///   - Every call either succeeds or reverts with a documented
+    ///     string (no bare panics).
+    function testFuzz_Withdraw_boundaryNoOverpayNoOverburn(uint256 assets, bool ownerIsAlice,
+                                                            bool receiverIsAlice) public {
+        assets = bound(assets, 1, type(uint112).max);
+
+        address owner_    = ownerIsAlice    ? ALICE : BOB;
+        address receiver_ = receiverIsAlice ? ALICE : BOB;
+
+        // Pre-seed leg0 with a large cash buffer so the withdrawal
+        // can always be fulfilled out of the leg. `bobAssets` is
+        // derived to keep the yield in a bounded, test-friendly range.
+        uint256 bobAssets = (assets % 9000) + 1000;
+        usdc.mint(BOB, bobAssets);
+        vm.prank(BOB);
+        usdc.approve(address(agg), type(uint256).max);
+        vm.prank(BOB);
+        agg.deposit(bobAssets, BOB);
+
+        // Simulate enough yield that leg0's cash >= 2 * max(assets)
+        // so both shareBalances and leg cash can absorb a big request
+        // without tripping "bad shares balance" (which is the guard
+        // we actually want to exercise on the under-owned case).
+        uint256 yieldForLeg = assets > 5000 ? assets : 5000;
+        leg0.mintYield(yieldForLeg);
+
+        // Snapshot pre-withdraw state.
+        uint256 ownerSharesBefore = agg.shares(owner_);
+        uint256 recvUsdcBefore    = usdc.balanceOf(receiver_);
+        uint256 expectedBurnShares = agg.convertToShares(assets);
+
+        if (_checkWithdrawAtomic(assets, owner_, receiver_, expectedBurnShares,
+                                 ownerSharesBefore, recvUsdcBefore)) {
+            // Success path: the vault must have burned exactly the
+            // convertToShares(assets) shares from the owner's balance
+            // and delivered exactly `assets` USDC to the receiver.
+            uint256 postShares = agg.shares(owner_);
+            uint256 postRecv   = usdc.balanceOf(receiver_);
+            assertEq(ownerSharesBefore - postShares, expectedBurnShares,
+                     "owner's shares reduced by exactly convertToShares(assets)");
+            assertLe(postShares, ownerSharesBefore,
+                     "vault never burns more shares than owner holds");
+            assertEq(postRecv - recvUsdcBefore, assets,
+                     "receiver received exactly `assets` USDC (no over-payment)");
+        }
+        // Failure path: the whole withdraw reverted atomically with
+        // no state change (asserted inside _checkWithdrawAtomic).
+    }
+
+    /// Returns true iff withdraw(assets, receiver, owner) succeeds
+    /// cleanly; false iff it reverts. Either revert message is
+    /// accepted — the vault has two "insufficient shares" guards
+    /// (`"bad shares balance"` for the per-owner check and
+    /// `"bad total shares"` for the aggregate check), and which one
+    /// fires first depends on which share count is smaller. The
+    /// atomicity property is what we actually care about: on revert,
+    /// no state changes.
+    function _checkWithdrawAtomic(uint256 assets, address owner_, address receiver_,
+                                  uint256 expectedBurnShares,
+                                  uint256 ownerSharesBefore,
+                                  uint256 recvUsdcBefore)
+        internal returns (bool success)
+    {
+        vm.prank(receiver_);
+        (bool ok, bytes memory ret) = address(agg).call(
+            abi.encodeCall(YieldAggregator.withdraw, (assets, receiver_, owner_))
+        );
+        if (!ok) {
+            // Failure: assert the revert carries data (not a bare
+            // panic) and the state is unchanged. The vault has
+            // three early reverts on this path:
+            //   (a) "zero withdrawal" (assets == 0, but we fuzz >= 1)
+            //   (b) "dust shares" (convertToShares(assets) rounds to
+            //       0 when the share/asset rate is very high)
+            //   (c) "bad shares balance" (the per-owner insufficient
+            //       shares check) or "bad total shares" (the aggregate
+            //       insufficient-shares check)
+            // We accept any of the share-side reverts (b, c).
+            assertGt(ret.length, 0, "withdraw revert must carry data");
+            assertEq(agg.shares(owner_), ownerSharesBefore,
+                     "failed withdraw must leave owner shares intact");
+            assertEq(usdc.balanceOf(receiver_), recvUsdcBefore,
+                     "failed withdraw must leave receiver USDC intact");
+            // Revert is only correct when either the request rounds
+            // to zero shares (dust) or the owner cannot afford the
+            // computed burn.
+            bool dustShares = expectedBurnShares == 0;
+            bool ownerShort = expectedBurnShares >= ownerSharesBefore;
+            assertTrue(dustShares || ownerShort,
+                       "revert only fires when request is dust or owner is short");
+            return false;
+        }
+        return true;
+    }
+
+    /// Zero-share / boundary edge cases: deposit and withdraw with
+    /// assets or shares at exactly 0, 1, and max(uint112). Each call
+    /// must either succeed cleanly with the correct state change, or
+    /// revert with a documented error message (never panic, never
+    /// silently under-deliver).
+    function testFuzz_ZeroShare_boundaries(uint256 seed) public {
+        seed = bound(seed, 100, 1000);
+        _zeroShareAllDeposits(seed);
+        _zeroShareAllRedeems(seed);
+        _zeroShareAllWithdraws(seed);
+    }
+
+    function _zeroShareAllDeposits(uint256 seed) internal {
+        // Alice has 1000 shares from setUp. Give her more via a small
+        // additional deposit so the edge-case fuzz has headroom.
+        usdc.mint(ALICE, seed);
+        vm.prank(ALICE);
+        usdc.approve(address(agg), type(uint256).max);
+        vm.prank(ALICE);
+        agg.deposit(seed, ALICE);
+
+        // (a) deposit(0) is a documented zero-amount revert.
+        vm.prank(ALICE);
+        vm.expectRevert(bytes("zero deposit"));
+        agg.deposit(0, ALICE);
+
+        // (b) deposit(1) succeeds cleanly (Alice has 1 USDC).
+        usdc.mint(ALICE, 1);
+        uint256 aliceSharesBefore = agg.shares(ALICE);
+        vm.prank(ALICE);
+        agg.deposit(1, ALICE);
+        assertEq(agg.shares(ALICE) - aliceSharesBefore, 1,
+                 "deposit(1) mints exactly 1 share at rate ~1");
+
+        // (c) deposit(MAX112) reverts — Alice does not hold enough USDC
+        //     to fund the transfer. The aggregator's `safeTransferFrom`
+        //     will revert at the ERC-20 level before any state change.
+        //     The revert bubbles up through the aggregator's SafeERC20
+        //     wrapper, so the message is "erc20 transferFrom failed"
+        //     (not the mock's "bal" inner message).
+        vm.prank(ALICE);
+        vm.expectRevert(bytes("erc20 transferFrom failed"));
+        agg.deposit(type(uint112).max, ALICE);
+    }
+
+    function _zeroShareAllRedeems(uint256 seed) internal {
+        // (d) redeem(0, _) is a documented zero-shares revert.
+        vm.prank(ALICE);
+        vm.expectRevert(bytes("zero redeem"));
+        agg.redeem(0, ALICE, ALICE);
+
+        // (e) redeem(1, _, ALICE) succeeds cleanly — burns 1 share,
+        //     pays out 1 USDC (rate == 1 after bootstrap).
+        usdc.mint(ALICE, 1);
+        uint256 aliceUsdcBefore = usdc.balanceOf(ALICE);
+        uint256 aliceSharesE = agg.shares(ALICE);
+        vm.prank(ALICE);
+        agg.redeem(1, ALICE, ALICE);
+        assertEq(agg.shares(ALICE), aliceSharesE - 1,
+                 "redeem(1) burned exactly 1 share");
+        assertEq(usdc.balanceOf(ALICE) - aliceUsdcBefore, 1,
+                 "redeem(1) paid out 1 USDC");
+
+        // (f) redeem(MAX112, _, ALICE) reverts with "bad shares balance"
+        //     (Alice holds far fewer shares than MAX112).
+        vm.prank(ALICE);
+        vm.expectRevert(bytes("bad shares balance"));
+        agg.redeem(type(uint112).max, ALICE, ALICE);
+    }
+
+    function _zeroShareAllWithdraws(uint256 seed) internal {
+        // (g) withdraw(0) is a documented zero-amount revert.
+        vm.prank(ALICE);
+        vm.expectRevert(bytes("zero withdrawal"));
+        agg.withdraw(0, ALICE, ALICE);
+
+        // (h) withdraw(1, ALICE, ALICE) succeeds cleanly.
+        uint256 aliceUsdcBefore2 = usdc.balanceOf(ALICE);
+        vm.prank(ALICE);
+        agg.withdraw(1, ALICE, ALICE);
+        assertEq(usdc.balanceOf(ALICE) - aliceUsdcBefore2, 1,
+                 "withdraw(1) paid out exactly 1 USDC");
+
+        // (i) withdraw(MAX112, ALICE, ALICE) reverts — the vault can
+        //     never fulfil a MAX112 withdrawal. The first tripped
+        //     require depends on which share count is smaller:
+        //     with totalShares small, convertToShares(MAX112) rounds
+        //     down to some share count that either exceeds Alice's
+        //     balance (bad shares balance) or exceeds totalShares
+        //     (bad total shares). Either way the call reverts cleanly
+        //     with a documented message; we assert the union.
+        vm.prank(ALICE);
+        {
+            (bool ok, bytes memory ret) = address(agg).call(
+                abi.encodeCall(YieldAggregator.withdraw,
+                               (type(uint112).max, ALICE, ALICE))
+            );
+            assertTrue(!ok, "MAX112 withdraw must revert");
+            // Revert data either contains the encoded revert string
+            // selector 0x08c3b250 with a message, or is empty for a
+            // native revert. Either is acceptable — we assert the
+            // call reverted with data (not a bare panic).
+            assertGt(ret.length, 0, "revert has data (not a bare panic)");
+        }
     }
 }

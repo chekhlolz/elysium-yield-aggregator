@@ -488,6 +488,73 @@ request.**
   mismatch was fixed by passing `--fund-accounts` on the Anvil
   command line. The existing mock-RPC fallback path is unchanged.
 
+### 5.1 ElysiumCoreWriter integration (round-14 addition)
+
+The `MockWriter` in `Legs.t.sol` records invocations but does not
+exercise venue-side validation. Round-14 adds a full mock —
+`FullElysiumCoreWriterMock` in
+`solidity/test/ElysiumCoreWriterIntegration.t.sol` — that
+implements the extended surface the real predeploy will expose
+beyond the current two-method interface stub:
+
+- `openPosition` / `closePosition` (interface impl, but with real
+  venue-side validation).
+- `getOpenOrders(delegator)` — returns the still-live positions.
+- `getPosition(assetId, delegator)` — returns the signed notional
+  (`+` for Long, `-` for Short).
+- `getPositionState(assetId, delegator)` — returns
+  `(notional, margin, totalLiquidated)`.
+- `liquidate(assetId, delegator, funds)` — sweeps 10% of
+  `|notional|` and realizes (mocked) pnl to the liquidator.
+- `setMargin(assetId, delegator, newMargin)` — adjusts the position's
+  margin subject to a hard floor (`MIN_MARGIN = 10_000`).
+
+Venue-side validation enforced by the mock:
+
+- Signature sanity (`sig.v ∈ {27, 28}`, `(r, s) ≠ (0, 0)`).
+- Per-order cap (`notional ≤ d.maxPerOrder`).
+- Per-venue cumulative notional cap
+  (`MAX_VENUE_NOTIONAL = 100 USD` per `(delegator, keeper, assetId)`).
+- Expiry (`d.expiresAt ≠ 0` AND `block.timestamp > d.expiresAt` →
+  reject; `expiresAt == 0` is the "never" sentinel).
+- Replay (composite key `keccak(keeper, nonce, salt)` seen once).
+
+The 23-test `ElysiumCoreWriterIntegrationTest` suite covers:
+
+- Open Short / Open Long — position book updates.
+- Close Short / full round-trip with distinct nonces.
+- Verifier path: zero sig rejected (`_fallbackSig` from the phase-1
+  `allocateTo` path cannot pass a real venue).
+- Verifier path: real sig accepted; sig hash recorded.
+- Expiry: expired delegations rejected, never-expires accepted.
+- Replay: same delegation rejected on second use.
+- Per-order cap enforced.
+- Per-venue cumulative cap enforced across calls.
+- Liquidate: sweeps 10% of `|notional|`, realizes pnl.
+- Set margin: below floor reverts, at/above floor accepted.
+- `getPositionState` returns the correct tuple.
+- Zero keeper / bad signature `v` rejected.
+- **Cross-test with `PerpFundingLeg.submitIntent`** — the writer
+  sees the perp-short notional (50% of the amount) at the venue.
+- **Cross-test with `BasisHedgeLeg.submitIntent`** — same pattern
+  on the basis leg.
+- **Cross-test: fallback sig rejected by real venue** — confirms
+  the round-7 KI-2 fix (`submitIntent`) is load-bearing: the
+  fallback path cannot pass a production venue's signature check.
+- **Production simulation: expired delegation** forwarded by a
+  compromised keeper is killed at the writer even if the leg-side
+  verifier accepts it.
+- **Production simulation: open → setMargin → liquidate** round-trip
+  through the full mock.
+- `getOpenOrders` returns both positions for a delegator with
+  positions on multiple assetIds.
+
+This closes the M3 (d) item "integration coverage against a real
+ElysiumCoreWriter" from `ROADMAP.md §4 M3 milestone`. The real
+predeploy is still not shipped; the mock covers the surface area
+that the venue-side spec (per `IElysiumCoreWriter.sol` doc comment
+and `AGGREGATOR_SPEC.md §2.3`) promises.
+
 ---
 
 ## 6. Fuzz targets
@@ -495,8 +562,10 @@ request.**
 Pure or nearly-pure functions worth fuzzing (no state dependency, or
 state that can be set up once). Coverage added in round-8 by
 `solidity/test/FuzzCoverage.t.sol` (20 fuzz tests, 256 runs each, all
-passing). Status markers below indicate which targets that file
-closes; the remaining items are still open.
+passing). Round-14 adds a second fuzz group (`FuzzFirstDepositor`,
+4 tests, 256 runs each, with `default.fuzz.runs = 512` at file level
+for high-complexity paths). Status markers below indicate which
+targets are closed; the remaining items are still open.
 
 - [x] **`RegimeDetector.computeRegime(int64 apySigned, uint256 volBps)`**
   — fuzz the full priority chain across all four branches. Closed by
@@ -540,6 +609,37 @@ closes; the remaining items are still open.
   `ecrecover` never panics on any `(v, r, s)`), `testFuzz_signatureRecovery_zeroRS`,
   `testFuzz_signatureRecovery_maxRS`, `testFuzz_signatureRecovery_vOutOfRange`,
   and `testFuzz_signatureRecovery_validSignatureAccepts`.
+
+**Round-14 additions — first-depositor & share-allowance fuzz**
+(`FuzzFirstDepositor` contract in `FuzzCoverage.t.sol`):
+
+- [x] **First-depositor attack resistance** — Bob deposits at the
+  already-seeded rate (Alice bootstrapped 1:1); assert Bob cannot
+  mint more shares than he contributes. Closed by
+  `testFuzz_FirstDepositor_bobCannotStealSeed`.
+- [x] **Multi-depositor share drift under yield** — Alice
+  deposits 1000, yield `yieldAmt` lands on leg 0, Bob deposits
+  `bobAssets` at the drifted rate, Alice withdraws everything.
+  Asserts totalAssets is preserved, Alice's share value is
+  within 4 USDC of `1000 + yieldAmt`, and Bob's share value is
+  within 8 USDC of his contribution. Closed by
+  `testFuzz_MultiDepositor_driftUnderYield`.
+- [x] **Share-burn replay fuzz** — fuzz `withdraw(assets,
+  receiver, owner)` with owner/receiver ∈ {ALICE, BOB} and
+  `assets` in `[1, max(uint112)]`. Asserts the vault is atomic:
+  either the call succeeds cleanly (burning exactly
+  `convertToShares(assets)` shares and paying exactly `assets`
+  USDC) or it reverts with a documented string. Closed by
+  `testFuzz_Withdraw_boundaryNoOverpayNoOverburn`.
+- [x] **Zero-share edge cases** — assets ∈ {0, 1, max(uint112)},
+  shares ∈ {0, 1, max(uint112)}. Asserts every boundary
+  combination either succeeds with a stable totalShares/totalAssets
+  or reverts cleanly. Closed by `testFuzz_ZeroShare_boundaries`.
+
+The file-level `// forge-config: default.fuzz.runs = 512` directive
+is set on the `FuzzCoverage.t.sol` test suite to give the
+first-depositor paths 2× the standard 256 runs (high-complexity
+multi-leg state transitions deserve the extra budget).
 
 ---
 

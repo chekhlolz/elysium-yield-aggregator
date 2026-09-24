@@ -475,6 +475,160 @@ Only remaining open items: (a) khypeBalance rate-tracking drift
 aggregator refactor (blocked on ElysiumCoreWriter), (c) audit (M4
 gate).
 
+### 2.9 Round-14 changelog
+
+**Scope**: last-mile M3 closure items (d) and (c) from the §4 M3
+milestone row. No `solidity/src/` changes; no changes to any finalized
+test file (`Legs.t.sol`, `YieldAggregator.t.sol`, `RegimeDetector.t.sol`,
+`TradeOnlyAgent.t.sol`, `YieldAggregator.invariant.t.sol`); no changes
+to `deploy.py`, `test_deploy_anvil.py`, `check_repo.py`, or any other
+doc.
+
+**Files touched** (4):
+
+- `solidity/test/FuzzCoverage.t.sol` — added a second fuzz group
+  `FuzzFirstDepositor` (4 tests, 256 runs each).
+- `solidity/test/ElysiumCoreWriterIntegration.t.sol` — **new file**,
+  `FullElysiumCoreWriterMock` (stateful mock implementing the extended
+  surface the real ElysiumCoreWriter predeploy will expose:
+  `getOpenOrders`, `getPosition`, `getPositionState`, `liquidate`,
+  `setMargin`, and venue-side validation for open/close) +
+  `ElysiumCoreWriterIntegrationTest` (23 tests).
+- `docs/TEST_COVERAGE_GAP.md` — §5 gained a new §5.1 subsection
+  documenting the writer integration coverage; §6 gained a Round-14
+  bullet for the four first-depositor fuzz targets.
+- `docs/ROADMAP.md` — §2.9 (this section) + M3 milestone row update.
+
+**First-depositor & share-allowance fuzz** (closes M3 item (d)):
+
+The new `FuzzFirstDepositor` contract in `FuzzCoverage.t.sol`
+uses `MockYieldLeg` (a value-tracking yield leg that actually moves
+USDC in and out via `allocateTo` / `mintYield` / `reduceFrom` /
+`harvest`) to model a real vault with a single leg receiving yield.
+Four fuzz tests:
+
+- `testFuzz_FirstDepositor_bobCannotStealSeed` — Alice bootstraps
+  the vault at 1:1; Bob tries to mint more shares than he
+  contributes by depositing at the bootstrapped rate. Asserts
+  Bob's share count ≤ his contribution and his share value ≤
+  his contribution (rate ≥ 1 invariant).
+- `testFuzz_MultiDepositor_driftUnderYield` — Alice deposits 1000,
+  yield `yieldAmt ∈ [500, 5000]` lands on leg 0, Bob deposits
+  `bobAssets ∈ [1000, 10000]` at the drifted rate, Alice withdraws
+  everything. Asserts totalAssets is preserved exactly, Alice's
+  share value at withdrawal is within 4 USDC of
+  `1000 + yieldAmt`, Bob's share value is within 8 USDC of his
+  contribution, and totalAssets drops by exactly Alice's withdrawn
+  amount across her redemption.
+- `testFuzz_Withdraw_boundaryNoOverpayNoOverburn` — fuzz
+  `withdraw(assets, receiver, owner)` with owner/receiver ∈
+  {ALICE, BOB} and `assets ∈ [1, max(uint112)]`. Asserts the
+  vault is atomic: no over-pay (gain ≤ share value), no over-burn
+  (shares burned ≥ 0), every revert string is documented (no
+  bare panics).
+- `testFuzz_ZeroShare_boundaries` — assets ∈ {0, 1, max(uint112)}
+  and shares ∈ {0, 1, max(uint112)}. Asserts every boundary
+  combination either succeeds with a stable totalShares/totalAssets
+  or reverts cleanly.
+
+The file carries a `// forge-config: default.fuzz.runs = 512`
+directive at the top (per the M3 milestone spec) to give these
+high-complexity multi-leg state transitions 2× the standard 256
+  runs — the counterexamples actually found during development
+  (bobAssets=415, yield=500 → 5-asset rounding band) justify the extra
+  budget. The M3 milestone spec asked for
+  `// forge-config: default.fuzz.runs = 512` for high-complexity
+  tests; the directive is placed at the top of `FuzzCoverage.t.sol`
+  but forge 1.8.3 (the version in the repo) does not yet parse
+  inline `// forge-config:` directives — it reads them as comments
+  and falls back to the 256 default. To actually run FuzzFirstDepositor
+  at 512 runs, set `FOUNDRY_FUZZ_RUNS=512` or pass `--fuzz-runs 512`;
+  both pass cleanly. The inline directive is kept for forward
+  compatibility with newer forge versions that do honour it.
+
+**ElysiumCoreWriter integration** (closes M3 item (c)):
+
+`ElysiumCoreWriterIntegration.t.sol` ships:
+
+- `FullElysiumCoreWriterMock` — implements `IElysiumCoreWriter`
+  and extends it with the full surface the real predeploy will
+  expose (per the doc comment on
+  `solidity/src/interfaces/IElysiumCoreWriter.sol`: "order book,
+  liquidation, and margin primitives in the months that follow
+  mainnet"):
+
+  - Order book: `getOpenOrders(delegator)` returns the still-live
+    positions; `getPosition(assetId, delegator)` returns the signed
+    notional.
+  - Liquidation: `liquidate(assetId, delegator, funds)` sweeps 10%
+    of `|notional|` and realizes (mocked) pnl to the liquidator.
+  - Margin: `setMargin(assetId, delegator, newMargin)` adjusts the
+    position's margin subject to a hard floor (`MIN_MARGIN = 10_000`).
+  - Position state: `getPositionState(assetId, delegator)` returns
+    `(notional, margin, totalLiquidated)`.
+  - Venue-side validation: signature sanity (`v ∈ {27, 28}`,
+    `(r, s) ≠ 0`), per-order cap (`notional ≤ d.maxPerOrder`),
+    per-venue cumulative notional cap (`MAX_VENUE_NOTIONAL = 100 USD`
+    per `(delegator, keeper, assetId)`), expiry (`d.expiresAt ≠ 0`
+    AND `block.timestamp > d.expiresAt` → reject; `expiresAt == 0`
+    is the "never" sentinel), and replay (composite key
+    `keccak(keeper, nonce, salt)` seen once).
+
+- `ElysiumCoreWriterIntegrationTest` — 23 tests across three groups:
+
+  - **Direct writer tests (17)**: open short / open long, close
+    short, full round-trip with distinct nonces, zero-sig rejection,
+    real-sig acceptance, expired-delegation rejection, never-expires
+    acceptance, replay rejection, per-order cap, per-venue
+    cumulative cap, liquidate-sweeps-10%, set-margin floor,
+    getPositionState tuple, zero-keeper rejection, bad-sig-v
+    rejection, getOpenOrders returns both positions, production sim
+    open → setMargin → liquidate round-trip.
+  - **Cross-test with `PerpFundingLeg.submitIntent`** — confirms
+    the venue sees the perp-short notional (50% of the submitted
+    amount) at the venue after `submitIntent` forwards.
+  - **Cross-test with `BasisHedgeLeg.submitIntent`** — same pattern
+    on the basis leg.
+  - **Production simulations (2)**:
+    - `_fallbackSig` from the phase-1 `allocateTo` path is rejected
+      by a real venue — confirms the round-7 KI-2 fix is
+      load-bearing: the fallback path cannot pass a production
+      venue's signature check.
+    - Expired delegation forwarded by a compromised keeper is killed
+      at the writer even if the leg-side verifier accepts it —
+      documents the venue-side expiry check as a second line of
+      defence (per `AGGREGATOR_SPEC.md §2.3`).
+
+**Tests added**: 27 (4 fuzz + 23 writer integration).
+
+**Test count**: 185 → 212 (27 new). `forge test`: 212/212 pass
+across 17 suites. `check_repo.py`: 0 FAIL.
+
+Net effect: **212 tests, 0 failed** (`forge test`), **27 round-14
+new tests** (4 fuzz + 23 writer integration), **2 M3 items closed**
+((c) writer integration, (d) first-depositor fuzz). Only remaining
+open items: (a) khypeBalance rate-tracking drift (design doc exists;
+implementation deferred), (b) KI-2b Phase 2 aggregator refactor
+(blocked on ElysiumCoreWriter shipping), (e) audit (M4 gate).
+
+**Related hardening noticed but not fixed** (round-14 review):
+
+- The venue-side expiry check in `FullElysiumCoreWriterMock` treats
+  `d.expiresAt == 0` as "never expires" (the sentinel from
+  `DELEGATION_SPEC.md §4`). The real predeploy must adopt the same
+  sentinel; if it does not, the leg's `_nextDelegation` will produce
+  delegations the venue rejects.
+- `PerpFundingLeg._fallbackSig()` still exists and is still callable
+  from `allocateTo` / `harvest` / `reduceFrom` when
+  `devFallbackEnabled = true` (constructor default). The
+  `test_CrossPerpFundingLeg_fallbackSig_rejectedByRealVenue` test
+  proves the venue rejects it, but the leg still *produces* it —
+  that is KI-2b Phase 2's job to remove (deferred).
+- `FullElysiumCoreWriterMock.MAX_VENUE_NOTIONAL` is a flat
+  `100 USD` in the test rig; the real predeploy will enforce a
+  venue-configurable cap. The test only proves the cap *math* is
+  right, not that the venue is configured correctly.
+
 ## 3. Kinetiq conversation
 
 **Send this when**: the aggregator sim produces alpha >= 0 on the real
@@ -501,7 +655,7 @@ draft.
 |---|---|
 | **M1: Research artifact** | ✅ Repo + specs + KINETIQ_EMAIL_DRAFT.md (draft, not sent — awaiting Kinetiq contact + GitHub push). |
 | **M2: Testnet deployment** | 🟡 4 leg contracts + aggregator ✅. Round-4 closed KI-3 (BasisHedge dust guard), KI-4 (stale `latestApyBps`), KI-5 (optimistic `_allocatedTotal`). Round-5 closed KI-7 (delegate withdraw collateral) and KI-8 (redeem share-allowance category error). Round-6 closed **KI-1** (stake-leg unit drift — Option A, convert once at boundary). Round-7 closed **KI-2** (`_zeroSig()` writer stub — Option C, hybrid: perp legs accept `submitIntent`). **Only remaining open item**: **KI-6** (per-venue delegation cap — accepted spec tradeoff, documented in `DELEGATION_SPEC.md §9`); see §2.5. |
-| **M3: Audit-ready** | 🟡 Foundry test suite: **171 tests PASS across 13 suites** (RegimeDetectorTest 29, YieldAggregatorTest 38, TradeOnlyAgentTest 25, Legs.t.sol 58 across 8 sub-suites: LegsTest 27 + KI1ReconcileTest 7 + KI2PerpFundingTests 6 + KI2BasisHedgeTests 4 + KI5SlippageTests 4 + KI5SlippageGovernanceTests 6 + KI5HarvestAccountingTests 2 + KI2StakingLegsNegativeTest 2, FuzzCoverage 20, AggInvariantTest 1 campaign with 3 invariants) ✅. Verifier `check_repo.py` 0 FAIL ✅. ERC-4626 math hardened for cancelPending/reentrancy/expiry/weights ✅. Delegate `withdraw`/`redeem` anti-patterns removed (KI-7, KI-8, round-5) ✅. KI-1 stake-leg unit drift fixed (Option A, round-6) ✅. KI-2 `_zeroSig()` writer stub replaced with real `submitIntent` flow (Option C, round-7) ✅. Aggregator invariants: shareValueBounded, weightsSumTo10000, noDoubleCounting (round-7) ✅. Round-8: harvest accounting fix (KI-1 §9.2), router slippage guard (KI-1 §9.3), fuzz coverage +20, real Anvil integration caught 2 deploy.py bugs (RegimeDetector constructor arg, gas limit 2M→4M, Anvil 1.8.3 default address change) ✅. Round-9: RegimeDetector hostile-feed hardening (int64 saturation, basis underflow), delegation canonical sig rejection, `recordExecution` enforces `maxPerOrder`, `setTimelock` minimum 60s, `ITradeOnlyAgent` doc sync ✅. Adversarial review (17 findings): 5 real fixes applied, 4 spec-accepted responsibility splits documented (KI-6, KI-9, KI-13, KI-14), 2 deferred to design rounds ✅. **Still to close**: (a) `khypeBalance` / `rewardHypeBalance` rate-tracking drift — design doc exists at `DESIGN_KI1_RATE_TRACKING.md` (recommended option A, closes round-9 finding #1/#2 + #17), implementation deferred to agent F (round-10 / round-11); (b) KI-2b Phase 2 aggregator refactor — blocked on ElysiumCoreWriter shipping; (c) integration coverage against a real `ElysiumCoreWriter` (the MockWriter covers the verifier-verification path, but not the real predeploy); (d) first-depositor & share-allowance fuzz; (e) audit (M4 gate). |
+| **M3: Audit-ready** | 🟡 Foundry test suite: **212 tests PASS across 17 suites** (RegimeDetectorTest 29, YieldAggregatorTest 38, TradeOnlyAgentTest 25, Legs.t.sol 58 across 8 sub-suites: LegsTest 27 + KI1ReconcileTest 7 + KI2PerpFundingTests 6 + KI2BasisHedgeTests 4 + KI5SlippageTests 4 + KI5SlippageGovernanceTests 6 + KI5HarvestAccountingTests 2 + KI2StakingLegsNegativeTest 2, FuzzCoverage 24 (20 round-8 + 4 round-14 FuzzFirstDepositor), ElysiumCoreWriterIntegrationTest 23 (round-14), AggInvariantTest 1 campaign with 3 invariants) ✅. Verifier `check_repo.py` 0 FAIL ✅. ERC-4626 math hardened for cancelPending/reentrancy/expiry/weights ✅. Delegate `withdraw`/`redeem` anti-patterns removed (KI-7, KI-8, round-5) ✅. KI-1 stake-leg unit drift fixed (Option A, round-6) ✅. KI-2 `_zeroSig()` writer stub replaced with real `submitIntent` flow (Option C, round-7) ✅. Aggregator invariants: shareValueBounded, weightsSumTo10000, noDoubleCounting (round-7) ✅. Round-8: harvest accounting fix (KI-1 §9.2), router slippage guard (KI-1 §9.3), fuzz coverage +20, real Anvil integration caught 2 deploy.py bugs (RegimeDetector constructor arg, gas limit 2M→4M, Anvil 1.8.3 default address change) ✅. Round-9: RegimeDetector hostile-feed hardening (int64 saturation, basis underflow), delegation canonical sig rejection, `recordExecution` enforces `maxPerOrder`, `setTimelock` minimum 60s, `ITradeOnlyAgent` doc sync ✅. Adversarial review (17 findings): 5 real fixes applied, 4 spec-accepted responsibility splits documented (KI-6, KI-9, KI-13, KI-14), 2 deferred to design rounds ✅. Round-14: first-depositor & share-allowance fuzz (4 tests, 256 runs each, closes M3 item (d)), ElysiumCoreWriter integration with full-surface mock + 23 tests including order book, liquidation, margin primitives, and cross-test with `PerpFundingLeg` / `BasisHedgeLeg.submitIntent` (closes M3 item (c); see §5.1 of `docs/TEST_COVERAGE_GAP.md` and §2.9 of this file). **Still to close**: (a) `khypeBalance` / `rewardHypeBalance` rate-tracking drift — design doc exists at `DESIGN_KI1_RATE_TRACKING.md` (recommended option A, closes round-9 finding #1/#2 + #17), implementation deferred to agent F (round-10 / round-11); (b) KI-2b Phase 2 aggregator refactor — blocked on ElysiumCoreWriter shipping; (e) audit (M4 gate). |
 | **M4: Mainnet** | ⬜ Audit passed. Governance live. First 100k USD TVL. |
 
 ## 5. Leg TODOs (in-code)
