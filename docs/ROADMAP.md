@@ -720,6 +720,106 @@ harness, or verifier.
   history (rounds 2 → 14), open items, verification commands,
   repo hygiene, and license/IP.
 
+### 2.11 Round-16 through Round-19 changelog (2026-09-24)
+
+Post-audit work executed while waiting on Kinetiq reply. All changes
+pushed to GitHub master at `0284a9d` (round-18) plus two more on top
+in this window. Test counts are cumulative where noted.
+
+- **Round-16 (`a667c50`)**: added `keeper-runtime/` (A1) and
+  `dev-harness/` (A2).
+  - **`keeper-runtime/`**: TypeScript keeper runtime with bit-exact
+    EIP-712 signing for the `TradeOnlyAgent` delegation struct.
+    Hand-computed digest (not `TypedDataEncoder.hashTypedData`)
+    because the contract inserts `_from` into the outer `abi.encode`
+    but the typehash omits `_from` — a non-standard EIP-712 shape.
+    Signing uses `signingKey.sign(digest)`, not `signMessage(digest)`,
+    because the contract calls `ecrecover` on the raw digest, not the
+    EIP-191-wrapped form. 74 vitest tests pass.
+  - **`dev-harness/`**: standalone Foundry library for testing
+    against the unpublished Elysium L1Read precompile. Uses
+    `vm.store` + `vm.deployCode` at a placeholder address; adapter
+    from mock to `IMarketDataFeed`; snapshot-based fixture for
+    reproducibility. 53 forge tests pass.
+  - SECURITY.md + `.env.example` in both (Hardhat dev key #0, clearly
+    flagged "never for real funds"). `.mimosa/` gitignored.
+- **Round-17 (`77182a0`)**: A3 — Liminal xHYPE as the 5th leg.
+  - `solidity/src/interfaces/IXHYPELeg.sol` — marker interface with
+    `apyBps()` and `isLiquidatable()` on top of ERC-4626 shape.
+  - `solidity/src/legs/LiminalXHYPELeg.sol` — full ERC-4626 wrapper
+    for Liminal xHYPE: USDC→HYPE→vault flow, CCE reentrancy guard,
+    slippage bound against oracle price post-swap,
+    `oracle→vault→fixed` APY fallback chain, `harvest()` for
+    residuals, `maxAllocationUsd` cap, `isLiquidatable()` gate,
+    owner setters.
+  - `RegimeDetector.sol`: added `weightsForRegime5(regime)` +
+    `XHYPE_WEIGHT_BPS(regime)` + internal `_weightsForRegime5`.
+    5-slot vectors per regime summing to 10,000 bps:
+    FUNDING_STRONG `[0, 400, 6000, 3000, 600]`,
+    FUNDING_WEAK `[2000, 800, 4000, 2000, 1200]`,
+    FUNDING_NEG `[4000, 2400, 0, 0, 3600]`,
+    HIGH_VOL `[5000, 2000, 0, 0, 3000]`. xHYPE weight always
+    ≤ original kHYPE weight in the same regime (xHYPE-first
+    migration, since xHYPE is strictly better than kHYPE on APY).
+  - `YieldAggregator.sol`: `IYieldLeg[5] public legs`, new
+    `setXHYPELeg(IYieldLeg, uint16 weightBps)` owner setter, new
+    views `weights5()`, `legsView5()`, `xhypeWeight()`, `legAt(i)`,
+    `currentValueOfLeg(i)`. Constructor kept at 4-arg tuple so
+    all 225 pre-round-17 tests compile + pass unchanged.
+  - **297 forge tests pass, 0 fail** (was 225 in round-15; +72 new
+    tests across `LiminalXHYPELeg.t.sol` (39) and
+    `RegimeDetector.fifthLeg.t.sol` (33)).
+- **Round-18 (`0284a9d`)**: A11 — Elysium Builders Starter Kit.
+  - **`elix-kit/`**: self-contained Foundry + TypeScript template
+    that lives in the aggregator repo but is designed to be copied
+    out and used standalone. `cd elix-kit && cd solidity && forge test`
+    gives a working scaffold in <5 minutes.
+  - Solidity: `HelloElysium.sol` (trivial greeting),
+    `VaultStarter.sol` (minimal ERC-4626 vault with owner-gated
+    `setTargetApyBps`, full transfer/transferFrom/approve plumbing,
+    MockERC20 inline in the test). Two interfaces copied from the
+    parent repo (`IERC20.sol`, `ITradeOnlyAgent.sol`); rest is new.
+  - TypeScript: `ElysiumClient` helper that takes
+    `(rpcUrl, deployerPk)` and exposes `deployHelloElysium(greeting)`
+    + `deployVaultStarter(targetApyBps)`. Vitest tests for
+    ABI encode/decode roundtrip (offline, no live RPC).
+  - Apache-2.0 license, SECURITY.md points to parent SECURITY.md
+    for the aggregator-specific threat model.
+  - **15 forge tests pass, 0 fail** in `elix-kit/solidity/`. 11
+    vitest tests written (not run — no `node_modules` in CI).
+  - Also in this commit: `docs/KINETIQ_EMAIL_DRAFT.md` handle split
+    fixed to `@chekhlolz (GitHub), @icesilentx (X)` on line 4 and
+    `@icesilentx (X) / @chekhlolz (GitHub)` on line 200. This was
+    a mistake in the round-16 commit that conflated the two handles.
+- **Round-19 (`3076ba8`)**: A12 — Kinetiq Partners One-Pager.
+  - **`docs/KINETIQ_PARTNERS_ONEPAGER.md`**: self-contained 243-line
+    one-pager that can be pasted as a DM to Kinetiq or attached
+    alongside the longer `KINETIQ_EMAIL_DRAFT.md`. Same contacts,
+    same routing options, same alpha framing. Explicitly does not
+    ask for KNTQ allocation or priority routing — engineering time +
+    technical review only.
+  - Structure: TL;DR → what we built → why Elysium specifically →
+    what we're asking for → contacts → repo hygiene → known
+    limitations → committed timeline. Honest limitations section
+    (per-venue notional cap, xHYPE not on Elysium yet, alpha below
+    Liminal live, not audited, chainId placeholder, no live deploy).
+
+### 2.12 Repo totals after round-19
+
+- Solidity contracts: **7** (unchanged from round-15).
+- Solidity interfaces: **12** (was 10 in round-15; +`IXHYPELeg.sol`
+  in the parent, +1 more interface count from the aggregator).
+- Forge tests in parent `solidity/`: **297 pass / 0 fail** (was
+  225 in round-15).
+- Forge tests in `dev-harness/`: **53 pass / 0 fail**.
+- Forge tests in `elix-kit/solidity/`: **15 pass / 0 fail**.
+- Vitest tests in `keeper-runtime/`: **74 pass / 0 fail**.
+- **Total tests**: **439**, all green.
+- License: Apache-2.0 across all three sub-repos.
+- Repo state: pushed to GitHub `chekhlolz/elysium-yield-aggregator`
+  master at `3076ba8` (round-19). A1 daemon core agent still running
+  at the time of this ROADMAP refresh; will land as round-20.
+
 ## 3. Kinetiq conversation
 
 **Send this when**: the aggregator sim produces alpha >= 0 on the real
