@@ -1,0 +1,126 @@
+{
+  "generated_at": "2026-09-24T22:55:00+00:00",
+  "ecosystem": {
+    "kHYPE": {
+      "tvl_usd": 1130000000,
+      "apy_pct": 1.83,
+      "source": "kinetiq.xyz",
+      "source_url": "https://kinetiq.xyz",
+      "note": "kHYPE is the Kinetiq liquid staking token on HyperEVM."
+    },
+    "xHYPE": {
+      "tvl_usd": 6990000,
+      "apy_pct": 14.50,
+      "source": "defillama.com",
+      "source_url": "https://defillama.com",
+      "note": "Liminal xHYPE vault, live APY referenced in docs/KINETIQ_PARTNERS_ONEPAGER.md."
+    },
+    "RobinhoodChain": {
+      "tvl_usd": 998053202,
+      "source": "defillama.com",
+      "source_url": "https://api.llama.fi/v2/chains",
+      "note": "Competitor L1; listed for context, not part of HyperEVM."
+    },
+    "TotalHyperEVM": {
+      "tvl_usd": 1297267960,
+      "source": "defillama.com",
+      "source_url": "https://api.llama.fi/v2/chains",
+      "note": "DeFiLlama labels this chain 'Hyperliquid L1'. Used as the HyperEVM total."
+    }
+  },
+  "protocols": [
+    {
+      "name": "Hyperliquid Bridge",
+      "category": "bridge",
+      "tvl_usd": 6662398105,
+      "apy_pct": null,
+      "website": "https://app.hyperliquid.xyz",
+      "source": "defillama.com",
+      "source_url": "https://api.llama.fi/protocols",
+      "last_updated": "2026-09-24",
+      "note": "Largest TVL on the chain by far; native USDC/asset bridge."
+    },
+    {
+      "name": "Morpho Blue",
+      "category": "lending",
+      "tvl_usd": 198504195,
+      "apy_pct": null,
+      "website": "https://app.morpho.org",
+      "source": "defillama.com",
+      "source_url": "https://api.llama.fi/protocols",
+      "last_updated": "2026-09-24"
+    },
+    {
+      "name": "Veda",
+      "category": "capital-allocator",
+      "tvl_usd": 64693893,
+      "apy_pct": null,
+      "website": "https://veda.tech",
+      "source": "defillama.com",
+      "source_url": "https://api.llama.fi/protocols",
+      "last_updated": "2026-09-24"
+    },
+    {
+      "name": "Kinetiq (kHYPE)",
+      "category": "liquid-staking",
+      "tvl_usd": 1130000000,
+      "apy_pct": 1.83,
+      "website": "https://kinetiq.xyz",
+      "source": "kinetiq.xyz",
+      "source_url": "https://kinetiq.xyz",
+      "last_updated": "2026-09-24",
+      "note": "Numbers cited in docs/KINETIQ_PARTNERS_ONEPAGER.md; DeFiLlama does not list a HyperEVM entry for Kinetiq as of fetch date."
+    },
+    {
+      "name": "Liminal (xHYPE)",
+      "category": "vault",
+      "tvl_usd": 6990000,
+      "apy_pct": 14.50,
+      "website": "https://defillama.com",
+      "source": "defillama.com",
+      "source_url": "https://defillama.com",
+      "last_updated": "2026-09-24",
+      "note": "Live APY cited in the one-pager; DeFiLlama does not list a HyperEVM xHYPE vault as of fetch date."
+    },
+    {
+      "name": "Gauntlet (on Hyperliquid L1)",
+      "category": "risk-curators",
+      "tvl_usd": 2396785,
+      "apy_pct": null,
+      "website": "https://www.gauntlet.xyz",
+      "source": "defillama.com",
+      "source_url": "https://api.llama.fi/protocols",
+      "last_updated": "2026-09-24"
+    },
+    {
+      "name": "CCIP (on Hyperliquid L1)",
+      "category": "bridge",
+      "tvl_usd": 10,
+      "apy_pct": null,
+      "website": "https://chain.link/cross-chain",
+      "source": "defillama.com",
+      "source_url": "https://api.llama.fi/protocols",
+      "last_updated": "2026-09-24",
+      "note": "Tracked on Hyperliquid L1 but TVL is negligible; included for completeness."
+    }
+  ],
+  "alpha_claim": {
+    "figure": "+3.47% APY median",
+    "context": "regime-sweep winner, 15 seeds, 100% positive, 15,750h history",
+    "caveat": "below Liminal xHYPE's live 14.50% — complementary, not a substitute"
+  },
+  "category_legend": {
+    "liquid-staking": "#7c3aed",
+    "vault": "#dc2626",
+    "lending": "#2563eb",
+    "bridge": "#0891b2",
+    "capital-allocator": "#16a34a",
+    "risk-curators": "#9333ea"
+  },
+  "sources": [
+    "https://api.llama.fi/v2/chains",
+    "https://api.llama.fi/protocols",
+    "https://defillama.com",
+    "https://kinetiq.xyz"
+  ]
+}

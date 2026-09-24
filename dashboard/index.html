@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="license" content="Apache-2.0">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex, nofollow">
+  <title>HyperEVM Ecosystem Dashboard</title>
+  <script>window.__d = null;</script>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --panel: #121a2c;
+      --panel-2: #182238;
+      --text: #e6edf7;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-2: #a78bfa;
+      --danger: #f87171;
+      --ok: #34d399;
+      --border: #22304d;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      line-height: 1.5; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    header { padding: 28px 24px 12px; max-width: 1200px; margin: 0 auto; }
+    header h1 { font-size: 26px; margin: 0 0 4px; font-weight: 700; }
+    header .subtitle { color: var(--muted); font-size: 14px; }
+    main { max-width: 1200px; margin: 0 auto; padding: 8px 24px 40px; }
+    section { margin: 28px 0; }
+    section h2 { font-size: 18px; margin: 0 0 12px; color: var(--text);
+      border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+    .grid { display: grid; gap: 14px; }
+    .grid.kpis { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .kpi .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+    .kpi .value { font-size: 28px; font-weight: 700; margin: 6px 0 4px; }
+    .kpi .meta { font-size: 12px; color: var(--muted); }
+    .chart-wrap { background: var(--panel); border: 1px solid var(--border);
+      border-radius: 10px; padding: 16px; }
+    .chart-wrap canvas { width: 100%; height: 340px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; font-size: 12px; color: var(--muted); }
+    .legend span.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+      margin-right: 4px; vertical-align: middle; }
+    table { width: 100%; border-collapse: collapse; background: var(--panel);
+      border: 1px solid var(--border); border-radius: 10px; overflow: hidden; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+    th { background: var(--panel-2); color: var(--muted); font-weight: 600; text-transform: uppercase;
+      font-size: 11px; letter-spacing: 0.05em; }
+    tr:last-child td { border-bottom: 0; }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .badge { display: inline-block; padding: 1px 8px; border-radius: 999px;
+      font-size: 11px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); }
+    .alpha {
+      background: linear-gradient(135deg, rgba(56,189,248,0.10), rgba(167,139,250,0.10));
+      border: 1px solid var(--accent);
+      border-radius: 12px; padding: 20px;
+    }
+    .alpha .fig { font-size: 32px; font-weight: 700; color: var(--accent); margin: 0; }
+    .alpha .ctx { color: var(--text); margin: 6px 0; }
+    .alpha .cav { color: var(--muted); font-size: 13px; margin-top: 8px; }
+    .alpha .cav strong { color: var(--danger); font-weight: 600; }
+    .foot { margin-top: 40px; color: var(--muted); font-size: 12px; padding: 14px 24px;
+      border-top: 1px solid var(--border); max-width: 1200px; margin-left: auto; margin-right: auto; }
+    .foot ul { margin: 6px 0 0; padding-left: 18px; }
+    .noscript-box { background: var(--panel); border: 1px solid var(--border);
+      border-radius: 10px; padding: 14px; margin: 24px 0; }
+    .muted { color: var(--muted); }
+    @media (max-width: 640px) {
+      header h1 { font-size: 20px; }
+      .kpi .value { font-size: 22px; }
+      .alpha .fig { font-size: 24px; }
+      table { font-size: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>HyperEVM Ecosystem Dashboard</h1>
+    <div class="subtitle">as of <span id="gen-date">—</span></div>
+  </header>
+
+  <main>
+    <!-- Section 1: KPI grid -->
+    <section id="sec-kpis">
+      <h2>Top-line KPIs</h2>
+      <div class="grid kpis">
+        <div class="card kpi">
+          <div class="label">Total HyperEVM TVL</div>
+          <div class="value" id="kpi-total">—</div>
+          <div class="meta">DeFiLlama "Hyperliquid L1"</div>
+          <div class="meta"><a id="kpi-total-link" href="#">source</a></div>
+        </div>
+        <div class="card kpi">
+          <div class="label">kHYPE APY</div>
+          <div class="value" id="kpi-khype-apy">—</div>
+          <div class="meta">Kinetiq LST</div>
+          <div class="meta"><a id="kpi-khype-link" href="#">source</a></div>
+        </div>
+        <div class="card kpi">
+          <div class="label">xHYPE APY</div>
+          <div class="value" id="kpi-xhype-apy">—</div>
+          <div class="meta">Liminal vault</div>
+          <div class="meta"><a id="kpi-xhype-link" href="#">source</a></div>
+        </div>
+        <div class="card kpi">
+          <div class="label">Robinhood Chain TVL</div>
+          <div class="value" id="kpi-rh">—</div>
+          <div class="meta">Competitor L1</div>
+          <div class="meta"><a id="kpi-rh-link" href="#">source</a></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Section 2: Top protocols by TVL -->
+    <section id="sec-tvl">
+      <h2>Top protocols by TVL</h2>
+      <div class="chart-wrap">
+        <canvas id="chart-tvl" role="img" aria-label="Bar chart of top protocols on HyperEVM by TVL in USD."></canvas>
+      </div>
+      <div class="legend" id="legend-tvl"></div>
+    </section>
+
+    <!-- Section 3: APY comparison -->
+    <section id="sec-apy">
+      <h2>APY comparison across categories</h2>
+      <div class="chart-wrap">
+        <canvas id="chart-apy" role="img" aria-label="Bar chart of APY comparison across liquid staking, vault, lending, and perp protocols."></canvas>
+      </div>
+      <div class="legend"><span><span class="swatch" style="background:#38bdf8"></span>APY %</span></div>
+    </section>
+
+    <!-- Section 4: Table (JS-rendered + noscript fallback) -->
+    <section id="sec-table">
+      <h2>All protocols</h2>
+      <div id="js-table"></div>
+      <noscript>
+        <div class="noscript-box">
+          <p><strong>JavaScript is disabled.</strong> Full data below (rendered as an accessible static table).</p>
+          <table id="noscript-table">
+            <thead>
+              <tr>
+                <th>Name</th><th>Category</th><th class="num">TVL (USD)</th>
+                <th class="num">APY %</th><th>Source</th><th>Last updated</th>
+              </tr>
+            </thead>
+            <tbody id="noscript-tbody">
+              <tr><td colspan="6" class="muted">
+                If the static table above is empty, open <code>data.json</code> next to this
+                file — every number there has a <code>source_url</code> field.
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </noscript>
+    </section>
+
+    <!-- Section 5: Alpha claim -->
+    <section id="sec-alpha">
+      <h2>Alpha claim — Elysium Yield Aggregator</h2>
+      <div class="alpha">
+        <p class="fig" id="alpha-fig">—</p>
+        <p class="ctx" id="alpha-ctx">—</p>
+        <p class="cav" id="alpha-cav">—</p>
+        <p class="cav">
+          Framed in <em>docs/KINETIQ_PARTNERS_ONEPAGER.md</em> as complementary to
+          xHYPE, not a substitute for it.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div>
+      Generated: <span id="foot-gen">—</span> &middot;
+      License: <a href="https://www.apache.org/licenses/LICENSE-2.0">Apache-2.0</a>
+    </div>
+    <div>Data sources:</div>
+    <ul id="foot-sources"></ul>
+  </footer>
+
+  <!-- Chart.js v4.4.3 from jsdelivr, pinned with SRI sha384 -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"
+          integrity="sha384-JUh163oCRItcbPme8pYnROHQMC6fNKTBWtRG3I3I0erJkzNgL7uxKlNwcrcFKeqF"
+          crossorigin="anonymous"></script>
+
+  <script>
+    // Only DOM-manipulation of trusted data.json content. No eval, no untrusted innerHTML.
+    (function () {
+      var DATA_URL = "data.json";
+      function fmtUsd(n) {
+        if (n == null || isNaN(n)) return "—";
+        if (n >= 1e9) return "$" + (n / 1e9).toFixed(2) + "B";
+        if (n >= 1e6) return "$" + (n / 1e6).toFixed(2) + "M";
+        if (n >= 1e3) return "$" + (n / 1e3).toFixed(1) + "K";
+        return "$" + Number(n).toFixed(0);
+      }
+      function fmtPct(n) {
+        if (n == null || isNaN(n)) return "—";
+        return Number(n).toFixed(2) + "%";
+      }
+      function set(id, text) {
+        var el = document.getElementById(id);
+        if (el) el.textContent = text;
+      }
+      function setHref(id, href) {
+        var el = document.getElementById(id);
+        if (el) el.setAttribute("href", href);
+      }
+
+      function buildLegend(container, entries) {
+        container.textContent = "";
+        entries.forEach(function (e) {
+          var span = document.createElement("span");
+          var swatch = document.createElement("span");
+          swatch.className = "swatch";
+          swatch.style.background = e.color;
+          span.appendChild(swatch);
+          span.appendChild(document.createTextNode(e.label));
+          container.appendChild(span);
+        });
+      }
+
+      function buildTable(container, rows) {
+        container.textContent = "";
+        var table = document.createElement("table");
+        var thead = document.createElement("thead");
+        var headRow = document.createElement("tr");
+        ["Name", "Category", "TVL (USD)", "APY %", "Source", "Last updated"].forEach(function (h) {
+          var th = document.createElement("th");
+          th.textContent = h;
+          if (h === "TVL (USD)" || h === "APY %") th.className = "num";
+          headRow.appendChild(th);
+        });
+        thead.appendChild(headRow);
+        table.appendChild(thead);
+        var tbody = document.createElement("tbody");
+        rows.forEach(function (p) {
+          var tr = document.createElement("tr");
+          var cells = [
+            p.name || "",
+            p.category || "",
+            fmtUsd(p.tvl_usd),
+            fmtPct(p.apy_pct),
+            p.source_url || "",
+            p.last_updated || ""
+          ];
+          cells.forEach(function (val, idx) {
+            var td = document.createElement("td");
+            if (idx === 2 || idx === 3) td.className = "num";
+            if (idx === 4 && val) {
+              var a = document.createElement("a");
+              a.href = val;
+              a.rel = "noopener noreferrer";
+              a.target = "_blank";
+              a.textContent = "source";
+              td.appendChild(a);
+            } else {
+              td.textContent = val;
+            }
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        container.appendChild(table);
+      }
+
+      function renderKPIs(d) {
+        var eco = d.ecosystem || {};
+        var total = eco.TotalHyperEVM || {};
+        var kH = eco.kHYPE || {};
+        var xH = eco.xHYPE || {};
+        var rh = eco.RobinhoodChain || {};
+        set("kpi-total", fmtUsd(total.tvl_usd));
+        set("kpi-khype-apy", fmtPct(kH.apy_pct));
+        set("kpi-xhype-apy", fmtPct(xH.apy_pct));
+        set("kpi-rh", fmtUsd(rh.tvl_usd));
+        setHref("kpi-total-link", total.source_url || "#");
+        setHref("kpi-khype-link", kH.source_url || "#");
+        setHref("kpi-xhype-link", xH.source_url || "#");
+        setHref("kpi-rh-link", rh.source_url || "#");
+      }
+
+      function renderCharts(d) {
+        if (typeof Chart === "undefined") return false;
+        var legendMap = d.category_legend || {};
+        var protocols = (d.protocols || []).slice().sort(function (a, b) {
+          return (b.tvl_usd || 0) - (a.tvl_usd || 0);
+        }).slice(0, 10);
+
+        var labels = protocols.map(function (p) { return p.name; });
+        var data = protocols.map(function (p) { return p.tvl_usd || 0; });
+        var colors = protocols.map(function (p) { return legendMap[p.category] || "#38bdf8"; });
+
+        new Chart(document.getElementById("chart-tvl"), {
+          type: "bar",
+          data: { labels: labels, datasets: [{ data: data, backgroundColor: colors }] },
+          options: {
+            indexAxis: "y",
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: { callbacks: { label: function (c) { return fmtUsd(c.parsed.x); } } }
+            },
+            scales: {
+              x: { type: "logarithmic", ticks: { callback: function (v) { return fmtUsd(v); } } },
+              y: { ticks: { color: "#e6edf7" } }
+            }
+          }
+        });
+
+        buildLegend(document.getElementById("legend-tvl"),
+          Object.keys(legendMap).map(function (k) {
+            return { color: legendMap[k], label: k.replace("-", " ") };
+          }));
+
+        var withApy = (d.protocols || []).filter(function (p) {
+          return typeof p.apy_pct === "number";
+        });
+        new Chart(document.getElementById("chart-apy"), {
+          type: "bar",
+          data: {
+            labels: withApy.map(function (p) { return p.name; }),
+            datasets: [{
+              label: "APY %",
+              data: withApy.map(function (p) { return p.apy_pct; }),
+              backgroundColor: "#38bdf8"
+            }]
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+              legend: { display: false },
+              tooltip: { callbacks: { label: function (c) { return fmtPct(c.parsed.y); } } }
+            },
+            scales: {
+              x: { ticks: { color: "#e6edf7" } },
+              y: { beginAtZero: true, ticks: { callback: function (v) { return v + "%"; } } }
+            }
+          }
+        });
+        return true;
+      }
+
+      function renderTable(d) {
+        buildTable(document.getElementById("js-table"), d.protocols || []);
+        // Populate the <noscript> table too, in case JS partially runs
+        var nsBody = document.getElementById("noscript-tbody");
+        if (nsBody) {
+          nsBody.textContent = "";
+          (d.protocols || []).forEach(function (p) {
+            var tr = document.createElement("tr");
+            [p.name || "", p.category || "", fmtUsd(p.tvl_usd),
+             fmtPct(p.apy_pct), p.source_url || "", p.last_updated || ""]
+              .forEach(function (val, idx) {
+                var td = document.createElement("td");
+                if (idx === 2 || idx === 3) td.className = "num";
+                td.textContent = val;
+                tr.appendChild(td);
+              });
+            nsBody.appendChild(tr);
+          });
+        }
+      }
+
+      function renderAlpha(d) {
+        var a = d.alpha_claim || {};
+        set("alpha-fig", a.figure || "—");
+        set("alpha-ctx", "Context: " + (a.context || "—"));
+        var cavEl = document.getElementById("alpha-cav");
+        if (cavEl) {
+          cavEl.innerHTML = "";
+          var strong = document.createElement("strong");
+          strong.textContent = "Caveat: ";
+          cavEl.appendChild(strong);
+          cavEl.appendChild(document.createTextNode(a.caveat || "—"));
+        }
+      }
+
+      function renderFooter(d) {
+        var gen = d.generated_at || "—";
+        set("gen-date", gen);
+        set("foot-gen", gen);
+        var ul = document.getElementById("foot-sources");
+        ul.textContent = "";
+        (d.sources || []).forEach(function (u) {
+          var li = document.createElement("li");
+          var a = document.createElement("a");
+          a.href = u;
+          a.rel = "noopener noreferrer";
+          a.target = "_blank";
+          a.textContent = u;
+          li.appendChild(a);
+          ul.appendChild(li);
+        });
+      }
+
+      function renderAll(d) {
+        renderKPIs(d);
+        var chartsOk = false;
+        try { chartsOk = renderCharts(d); } catch (e) { chartsOk = false; }
+        renderTable(d);
+        renderAlpha(d);
+        renderFooter(d);
+        if (!chartsOk) {
+          // If Chart.js failed to load, the noscript block still shows all data.
+          // Add a visible notice near the charts so the user knows.
+          ["chart-tvl", "chart-apy"].forEach(function (id) {
+            var c = document.getElementById(id);
+            if (c && !chartsOk) {
+              var wrap = c.parentElement;
+              var note = document.createElement("div");
+              note.className = "muted";
+              note.style.fontSize = "13px";
+              note.textContent = "Chart library failed to load from CDN. See the table below for the same data.";
+              wrap.insertBefore(note, c);
+            }
+          });
+        }
+      }
+
+      function load() {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", DATA_URL, true);
+        xhr.onload = function () {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try { renderAll(JSON.parse(xhr.responseText)); }
+            catch (e) { document.getElementById("js-table").textContent = "Failed to parse data.json: " + e.message; }
+          } else {
+            document.getElementById("js-table").textContent = "Failed to load data.json (HTTP " + xhr.status + ").";
+          }
+        };
+        xhr.onerror = function () {
+          document.getElementById("js-table").textContent = "Failed to load data.json. If opened via file://, some browsers block XHR — serve over HTTP or open data.json directly.";
+        };
+        xhr.send();
+      }
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", load);
+      } else {
+        load();
+      }
+    })();
+  </script>
+</body>
+</html>
