@@ -735,7 +735,8 @@ in this window. Test counts are cumulative where noted.
     but the typehash omits `_from` — a non-standard EIP-712 shape.
     Signing uses `signingKey.sign(digest)`, not `signMessage(digest)`,
     because the contract calls `ecrecover` on the raw digest, not the
-    EIP-191-wrapped form. 74 vitest tests pass.
+    EIP-191-wrapped form. **See round-21 for the daemon addition and the
+    updated test count (102).**
   - **`dev-harness/`**: standalone Foundry library for testing
     against the unpublished Elysium L1Read precompile. Uses
     `vm.store` + `vm.deployCode` at a placeholder address; adapter
@@ -806,6 +807,9 @@ in this window. Test counts are cumulative where noted.
 
 ### 2.12 Repo totals after round-19
 
+Snapshot at the time the round-20 ROADMAP refresh was written. Later
+rounds (21–23) are recorded below and supersede this snapshot.
+
 - Solidity contracts: **7** (unchanged from round-15).
 - Solidity interfaces: **12** (was 10 in round-15; +`IXHYPELeg.sol`
   in the parent, +1 more interface count from the aggregator).
@@ -813,12 +817,76 @@ in this window. Test counts are cumulative where noted.
   225 in round-15).
 - Forge tests in `dev-harness/`: **53 pass / 0 fail**.
 - Forge tests in `elix-kit/solidity/`: **15 pass / 0 fail**.
-- Vitest tests in `keeper-runtime/`: **74 pass / 0 fail**.
-- **Total tests**: **439**, all green.
+- Node:test tests in `keeper-runtime/`: **74 pass / 0 fail** at the
+  round-16 landing; grows to **102** in round-21 when the daemon and
+  venue-adapter test suites are added.
+- **Total tests at round-19**: **439**, all green. Grows to **467**
+  by round-23 (see §2.14).
 - License: Apache-2.0 across all three sub-repos.
 - Repo state: pushed to GitHub `chekhlolz/elysium-yield-aggregator`
   master at `3076ba8` (round-19). A1 daemon core agent still running
-  at the time of this ROADMAP refresh; will land as round-20.
+  at the time of this ROADMAP refresh; lands as round-21.
+
+### 2.13 Rounds 20–23 (2026-09-24)
+
+Post-A1-daemon + dashboard + ROADMAP refresh. All pushed to master.
+
+- **Round-20 (`1abb9ee`)**: ROADMAP §2.11/§2.12 refresh — recorded
+  rounds 16 through 19 and the running total test count of 439.
+- **Round-21 (this commit)**: A1 — Keeper daemon core.
+  - **`keeper-runtime/src/daemon.ts`** (462 lines): `KeeperDaemon`
+    polling loop with `tick()`, `start()`/`stop()` lifecycle,
+    monotonic nonce, sliding-window rate limit (60 tx/min), client-side
+    per-order cap check, venue-side revoke check, used-notional cap
+    check, `DaemonEvent` emitter. Nonce is consumed only when a
+    submission is *attempted* (both `submitted` and `failed` bump it,
+    `skipped` does not). Signing failures do not consume the nonce
+    because the venue state is unambiguous.
+  - **`keeper-runtime/src/venue-adapter.ts`** (285 lines): `IVenueAdapter`
+    interface + `MockElysiumCoreWriter` in-memory implementation
+    (FIFO queue, `usedNotional` keyed by `(delegator, keeper, nonce)`
+    triple, `revoke` per pair, `sumUsedNotional` accessor). The mock
+    does NOT verify EIP-712 — signature verification is covered
+    separately by `TradeOnlyAgent.sol` + `test/signing.test.ts`.
+  - **`keeper-runtime/src/daemon-types.ts`** (139 lines): shared types
+    — `PendingIntent`, `SubmitResult`, `SubmittedTrade`, `DaemonConfig`,
+    `DaemonEvent`, `KeeperDaemonStats`. Kept in its own file so the
+    daemon and venue adapter don't import from each other just to share
+    a shape.
+  - **Tests**: `test/daemon.test.ts` (17 cases) + `test/venue-adapter.test.ts`
+    (11 cases). Both converted to `node:test` — the A1 agent originally
+    imported `vitest`, which is not in `devDependencies`; conversion is
+    mechanical plus a `Date.now` freeze helper for the rate-limit window
+    (node:test ships no fake timers).
+  - **Test count change**: keeper-runtime went from 74 → **102 pass**.
+    Total repo tests now **467** (297 + 53 + 15 + 102).
+- **Round-22 (`c34ef22`)**: A6 — HyperEVM ecosystem dashboard.
+  - **`dashboard/`**: static single-page HTML + JSON + Python refresher,
+    no backend, no accounts, no analytics. Chart.js 4.4.1 SRI-pinned
+    via jsDelivr, `<noscript>` fallback, no `localStorage`.
+  - **`dashboard/data.json`**: 7 protocols (Hyperliquid Bridge, Kinetiq
+    kHYPE, Morpho Blue, Veda, Liminal xHYPE, Gauntlet, CCIP) +
+    ecosystem totals + Robinhood Chain peer comparison, all sourced
+    from DeFiLlama. Total HyperEVM TVL ≈ $1.297B in the snapshot.
+  - **`dashboard/refresh.py`**: 256-line stdlib-only DeFiLlama fetcher.
+    Idempotent, cron-friendly, no API keys.
+  - Serves as a shareable artifact in the Kinetiq conversation: shows
+    the ecosystem the aggregator will run in, without exposing any
+    internal tooling.
+
+### 2.14 Repo totals after round-23
+
+- Solidity contracts: **7**.
+- Solidity interfaces: **12**.
+- Forge tests in parent `solidity/`: **297 pass / 0 fail**.
+- Forge tests in `dev-harness/`: **53 pass / 0 fail**.
+- Forge tests in `elix-kit/solidity/`: **15 pass / 0 fail**.
+- Node:test tests in `keeper-runtime/`: **102 pass / 0 fail**.
+- **Total tests**: **467**, all green.
+- License: Apache-2.0 across all four sub-repos.
+- Repo state: pushed to GitHub `chekhlolz/elysium-yield-aggregator`
+  master at the round-23 HEAD. M3 fully closed; only M4 (audit gate)
+  + Kinetiq DM remains.
 
 ## 3. Kinetiq conversation
 
