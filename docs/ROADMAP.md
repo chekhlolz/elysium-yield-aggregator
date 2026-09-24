@@ -874,19 +874,77 @@ Post-A1-daemon + dashboard + ROADMAP refresh. All pushed to master.
     the ecosystem the aggregator will run in, without exposing any
     internal tooling.
 
-### 2.14 Repo totals after round-23
+### 2.14 Repo totals after round-26
 
-- Solidity contracts: **7**.
-- Solidity interfaces: **12**.
-- Forge tests in parent `solidity/`: **297 pass / 0 fail**.
+- Solidity contracts: **8 deployable** (round-15: 7; round-17 added
+  `LiminalXHYPELeg.sol` as the 5th leg targeting the 14.50% APY
+  Liminal xHYPE vault).
+
+  Counting convention here matches `AUDIT_SUMMARY.md §2` and the
+  `README.md §Contracts` table: the 7 aggregator-side contracts
+  (`YieldAggregator`, `TradeOnlyAgent`, `RegimeDetector`, `KHYPELeg`,
+  `SpotStakingLeg`, `PerpFundingLeg`, `BasisHedgeLeg`) plus the
+  round-17 `LiminalXHYPELeg.sol`. Some places in this document
+  say "7 contracts" because they were written pre-round-17 —
+  treat **8** as the current number.
+
+- Solidity interfaces: **12 interface files** across
+  `solidity/src/interfaces/` (was 10 in round-15; +`IXHYPELeg.sol`
+  in round-17, +`IIntentSubmittingLeg.sol` for stream-B). Adding
+  the inline `IMarketDataFeed` in `RegimeDetector.sol` and the
+  `IERC20Minimal` facades in the aggregator and `IERC20.sol` gives
+  **22 Solidity artifacts** total — matching
+  `AUDIT_SUMMARY.md §2`.
+- Deployed bytecode: **73,962 bytes** across the 8 contracts
+  (was 62,076 in round-15).
+- Forge tests in parent `solidity/`: **297 pass / 0 fail**
+  (was 225 in round-15; round-17 added the `LiminalXHYPELeg.t.sol`
+  suite (39) and `RegimeDetector.fifthLeg.t.sol` suite (33)).
 - Forge tests in `dev-harness/`: **53 pass / 0 fail**.
 - Forge tests in `elix-kit/solidity/`: **15 pass / 0 fail**.
-- Node:test tests in `keeper-runtime/`: **102 pass / 0 fail**.
+- Node:test tests in `keeper-runtime/`: **102 pass / 0 fail**
+  (74 at round-16; round-21 added the daemon + venue-adapter
+  test suites).
 - **Total tests**: **467**, all green.
 - License: Apache-2.0 across all four sub-repos.
 - Repo state: pushed to GitHub `chekhlolz/elysium-yield-aggregator`
-  master at the round-23 HEAD. M3 fully closed; only M4 (audit gate)
-  + Kinetiq DM remains.
+  master at the round-26 HEAD. External verifier `check_repo.py`
+  at **0 FAIL**. M3 fully closed; only M4 (audit gate) + Kinetiq DM
+  remains.
+
+### 2.15 Rounds 24–26 (2026-09-25)
+
+Doc-drift cleanup: catching up the docs that were last refreshed at
+round-15 (AUDIT_SUMMARY) and round-20 (KINETIQ_EMAIL_DRAFT) to
+match the current HEAD after rounds 17 (5th leg), 21 (keeper daemon),
+22 (dashboard), and 23–25 (prior doc refreshes).
+
+- **Round-24 (`5038762`)**: `README.md` contract-table refresh.
+  YieldAggregator 14,413→17,880, RegimeDetector 2,884→3,334,
+  added 3 missing rows (`LiminalXHYPELeg.sol`, `IXHYPELeg.sol`,
+  `IIntentSubmittingLeg.sol`); total 62,076 → 73,962 bytes.
+- **Round-25 (`4ac9734`)**: `AUDIT_SUMMARY.md` + `KINETIQ_PARTNERS_ONEPAGER.md`
+  refresh.
+  - AUDIT_SUMMARY: contract inventory + interface count updated for
+    round-17; test coverage section walks through rounds 13–23 with
+    current totals (297 forge / 467 repo-wide); verifier note
+    `0 FAIL as of round-24`.
+  - One-pager: expanded Trade-Only-Agent section with the round-21
+    keeper daemon core (KeeperDaemon polling loop, monotonic nonces
+    with the signing-failure vs submitTrade-throw asymmetry, 60-tx
+    rate limit, MockElysiumCoreWriter adapter); new §5 describing
+    the ecosystem dashboard; date bumped to 2026-09-25.
+- **Chore commit (`7ca00de`)**: one-pager HEAD reference changed
+  from a hardcoded SHA to a pointer-free `see git log for current
+  HEAD` form — avoids a stale-SHA ping-pong in future commits.
+- **Round-26 (`c60619c`)**: `KINETIQ_EMAIL_DRAFT.md` refresh.
+  Repo state section: 225 forge → 467 tests total (297 + 15 + 102
+  + 53); 20 commits → 50 commits; 7 contracts → 8 (adds
+  `LiminalXHYPELeg.sol`, round-17); 4 legs → 5; interfaces
+  notes 14 total including `IXHYPELeg` + `IIntentSubmittingLeg`.
+  Notes section: HEAD ref → pointer-free, matching round-25's
+  one-pager change. The email is still **not sent** — the user
+  has a standing constraint of no unrequested DMs to Kinetiq.
 
 ## 3. Kinetiq conversation
 
@@ -914,7 +972,7 @@ draft.
 |---|---|
 | **M1: Research artifact** | ✅ Repo + specs + KINETIQ_EMAIL_DRAFT.md (draft, not sent — awaiting Kinetiq contact + GitHub push). |
 | **M2: Testnet deployment** | 🟡 4 leg contracts + aggregator ✅. Round-4 closed KI-3 (BasisHedge dust guard), KI-4 (stale `latestApyBps`), KI-5 (optimistic `_allocatedTotal`). Round-5 closed KI-7 (delegate withdraw collateral) and KI-8 (redeem share-allowance category error). Round-6 closed **KI-1** (stake-leg unit drift — Option A, convert once at boundary). Round-7 closed **KI-2** (`_zeroSig()` writer stub — Option C, hybrid: perp legs accept `submitIntent`). **Only remaining open item**: **KI-6** (per-venue delegation cap — accepted spec tradeoff, documented in `DELEGATION_SPEC.md §9`); see §2.5. |
-| **M3: Audit-ready** | 🟡 Foundry test suite: **212 tests PASS across 17 suites** (RegimeDetectorTest 29, YieldAggregatorTest 38, TradeOnlyAgentTest 25, Legs.t.sol 58 across 8 sub-suites: LegsTest 27 + KI1ReconcileTest 7 + KI2PerpFundingTests 6 + KI2BasisHedgeTests 4 + KI5SlippageTests 4 + KI5SlippageGovernanceTests 6 + KI5HarvestAccountingTests 2 + KI2StakingLegsNegativeTest 2, FuzzCoverage 24 (20 round-8 + 4 round-14 FuzzFirstDepositor), ElysiumCoreWriterIntegrationTest 23 (round-14), AggInvariantTest 1 campaign with 3 invariants) ✅. Verifier `check_repo.py` 0 FAIL ✅. ERC-4626 math hardened for cancelPending/reentrancy/expiry/weights ✅. Delegate `withdraw`/`redeem` anti-patterns removed (KI-7, KI-8, round-5) ✅. KI-1 stake-leg unit drift fixed (Option A, round-6) ✅. KI-2 `_zeroSig()` writer stub replaced with real `submitIntent` flow (Option C, round-7) ✅. Aggregator invariants: shareValueBounded, weightsSumTo10000, noDoubleCounting (round-7) ✅. Round-8: harvest accounting fix (KI-1 §9.2), router slippage guard (KI-1 §9.3), fuzz coverage +20, real Anvil integration caught 2 deploy.py bugs (RegimeDetector constructor arg, gas limit 2M→4M, Anvil 1.8.3 default address change) ✅. Round-9: RegimeDetector hostile-feed hardening (int64 saturation, basis underflow), delegation canonical sig rejection, `recordExecution` enforces `maxPerOrder`, `setTimelock` minimum 60s, `ITradeOnlyAgent` doc sync ✅. Adversarial review (17 findings): 5 real fixes applied, 4 spec-accepted responsibility splits documented (KI-6, KI-9, KI-13, KI-14), 2 deferred to design rounds ✅. Round-14: first-depositor & share-allowance fuzz (4 tests, 256 runs each, closes M3 item (d)), ElysiumCoreWriter integration with full-surface mock + 23 tests including order book, liquidation, margin primitives, and cross-test with `PerpFundingLeg` / `BasisHedgeLeg.submitIntent` (closes M3 item (c); see §5.1 of `docs/TEST_COVERAGE_GAP.md` and §2.9 of this file). **Still to close**: (a) `khypeBalance` / `rewardHypeBalance` rate-tracking drift — design doc exists at `DESIGN_KI1_RATE_TRACKING.md` (recommended option A, closes round-9 finding #1/#2 + #17), implementation deferred to agent F (round-10 / round-11); (b) KI-2b Phase 2 aggregator refactor — blocked on ElysiumCoreWriter shipping; (e) audit (M4 gate). |
+| **M3: Audit-ready** | ✅ **CLOSED at round-19** (M4 audit gate is the only remaining milestone). At close, Foundry test suite was **212 tests PASS across 17 suites** (RegimeDetectorTest 29, YieldAggregatorTest 38, TradeOnlyAgentTest 25, Legs.t.sol 58 across 8 sub-suites: LegsTest 27 + KI1ReconcileTest 7 + KI2PerpFundingTests 6 + KI2BasisHedgeTests 4 + KI5SlippageTests 4 + KI5SlippageGovernanceTests 6 + KI5HarvestAccountingTests 2 + KI2StakingLegsNegativeTest 2, FuzzCoverage 24 (20 round-8 + 4 round-14 FuzzFirstDepositor), ElysiumCoreWriterIntegrationTest 23 (round-14), AggInvariantTest 1 campaign with 3 invariants). Since round-19, forge has grown to **297 pass / 23 suites** (round-17 added the `LiminalXHYPELeg.t.sol` 39 + `RegimeDetector.fifthLeg.t.sol` 33 = +72); repo-wide total **467 tests, all green** (round-26). Verifier `check_repo.py` 0 FAIL ✅. ERC-4626 math hardened for cancelPending/reentrancy/expiry/weights ✅. Delegate `withdraw`/`redeem` anti-patterns removed (KI-7, KI-8, round-5) ✅. KI-1 stake-leg unit drift fixed (Option A, round-6) ✅. KI-2 `_zeroSig()` writer stub replaced with real `submitIntent` flow (Option C, round-7) ✅. Aggregator invariants: shareValueBounded, weightsSumTo10000, noDoubleCounting (round-7) ✅. Round-8: harvest accounting fix (KI-1 §9.2), router slippage guard (KI-1 §9.3), fuzz coverage +20, real Anvil integration caught 2 deploy.py bugs (RegimeDetector constructor arg, gas limit 2M→4M, Anvil 1.8.3 default address change) ✅. Round-9: RegimeDetector hostile-feed hardening (int64 saturation, basis underflow), delegation canonical sig rejection, `recordExecution` enforces `maxPerOrder`, `setTimelock` minimum 60s, `ITradeOnlyAgent` doc sync ✅. Adversarial review (17 findings): 5 real fixes applied, 4 spec-accepted responsibility splits documented (KI-6, KI-9, KI-13, KI-14), 2 deferred to design rounds ✅. Round-14: first-depositor & share-allowance fuzz (4 tests, 256 runs each, closes M3 item (d)), ElysiumCoreWriter integration with full-surface mock + 23 tests including order book, liquidation, margin primitives, and cross-test with `PerpFundingLeg` / `BasisHedgeLeg.submitIntent` (closes M3 item (c); see §5.1 of `docs/TEST_COVERAGE_GAP.md` and §2.9 of this file). Round-17: Liminal xHYPE 5th leg with 39 forge tests; round-21: keeper daemon core with 17+11 node:test cases. **Still to close**: (a) `khypeBalance` / `rewardHypeBalance` rate-tracking drift — design doc exists at `DESIGN_KI1_RATE_TRACKING.md` (recommended option A, closes round-9 finding #1/#2 + #17), implementation deferred to agent F (round-10 / round-11); (b) KI-2b Phase 2 aggregator refactor — blocked on ElysiumCoreWriter shipping; (e) audit (M4 gate). |
 | **M4: Mainnet** | ⬜ Audit passed. Governance live. First 100k USD TVL. |
 
 ## 5. Leg TODOs (in-code)
