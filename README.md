@@ -193,8 +193,8 @@ mark-to-market oracle for BasisHedgeLeg unrealised PnL) live as inline
 
 ## License
 
-MIT. Not investment advice. Numbers are simulation outputs from a synthetic
-lognormal price path — real vaults will diverge.
+Apache-2.0 (see `LICENSE`). Not investment advice. Numbers are simulation
+outputs from a synthetic lognormal price path — real vaults will diverge.
 
 ## Workstream context
 
