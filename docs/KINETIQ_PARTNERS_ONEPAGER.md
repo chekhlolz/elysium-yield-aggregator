@@ -2,7 +2,7 @@
 
 **Prepared by**: Alexey — `@icesilentx` on X, `@chekhlolz` on GitHub
 **Repo**: https://github.com/chekhlolz/elysium-yield-aggregator (Apache-2.0,
-master, HEAD `4ac9734`)
+master branch; see git log for current HEAD)
 **Prepared for**: Kinetiq builders team (Discord `discord.kinetiq.xyz` / DM
 `@Enter_Elysium` on X)
 **Status**: Reference-quality, not audited. Not sent — awaiting Kinetiq
