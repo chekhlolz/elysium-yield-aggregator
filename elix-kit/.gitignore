@@ -1,0 +1,78 @@
+# OS X / Windows cruft
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Secrets
+.env
+.env.local
+.env.production
+.env.*.local
+*.pem
+*.key
+id_rsa*
+id_dsa*
+id_ed25519*
+nohup.out
+
+# Node / npm
+node_modules/
+dist/
+build/
+coverage/
+.npm/
+.npmrc
+yarn.lock
+package-lock.json.bak
+
+# TypeScript
+*.tsbuildinfo
+*.js.map
+*.d.ts.map
+
+# Foundry / forge
+solidity/out/
+solidity/cache/
+forge-cache/
+artifacts/
+coverage/
+coverage.json
+coverage.out
+broadcast/
+
+# Vendored deps: keep the sources, drop the inner VCS metadata so a
+# `git clone` of this kit doesn't recurse into forge-std's repo.
+solidity/lib/**/.git/
+solidity/lib/**/.github/
+solidity/lib/**/test/
+solidity/lib/**/demo/
+solidity/lib/**/script/
+solidity/lib/**/examples/
+
+# Editor
+.idea/
+.vscode/
+*.code-workspace
+
+# Python (parent repo noise, but keep out of the kit)
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Logs
+*.log
+server.log
+
+# Keep the tree tidy; do not commit empty-dir placeholders
+.gitkeep
+
+# Test artifacts
+.tmux/
+tmp/
+*.swp
+
+# Browser harness / agent scratch
+.zcode/
+.mimosa/

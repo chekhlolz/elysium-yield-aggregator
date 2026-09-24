@@ -1,0 +1,43 @@
+{
+  "name": "elix-kit-ts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript client for the Elysium Builders Starter Kit — deploy HelloElysium and VaultStarter against a local or Elysium RPC.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    ".env.example"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "example": "tsx scripts/run-example.ts"
+  },
+  "keywords": [
+    "elysium",
+    "kinetiq",
+    "hypercore",
+    "foundry",
+    "ethers",
+    "erc-4626"
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ethers": "^6.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.0.0"
+  }
+}

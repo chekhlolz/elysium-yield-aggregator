@@ -1,7 +1,7 @@
 # Draft email to Kinetiq — builders allocation
 
 **To**: Kinetiq builders team (no public email found — Discord `https://discord.kinetiq.xyz` or DM `@Enter_Elysium` on X are the live channels; see notes below)
-**From**: Alexey, HYPE/Elysium builder — @chekhlolz (GitHub & X)
+**From**: Alexey, HYPE/Elysium builder — @chekhlolz (GitHub), @icesilentx (X)
 **Subject**: Elysium Yield Aggregator + Trade-Only-Agent Protocol — proposal for builders allocation
 
 > Status: **DRAFT, NOT SENT.** Repo is pushed to
@@ -197,7 +197,7 @@ Not asking for:
 Python)
 
 We're happy to walk through any of this on a call. Reach out via
-Discord or X — @chekhlolz.
+Discord or X — @icesilentx (X) / @chekhlolz (GitHub).
 
 Thanks,
 Alexey

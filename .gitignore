@@ -16,3 +16,4 @@ cache/
 out/
 solidity/out/
 lib/
+.mimosa/  # ZCode Mimosa plugin runtime state (not part of the project)

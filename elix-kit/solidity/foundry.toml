@@ -1,0 +1,25 @@
+[profile.default]
+src = "src"
+out = "out"
+test = "test"
+libs = ["lib"]
+solc = "0.8.26"
+evm_version = "paris"
+optimizer = true
+optimizer_runs = 200
+via_ir = false
+remappings = [
+    "@forge-std/=lib/forge-std/src/",
+]
+
+[profile.default.fuzz]
+runs = 512
+
+[profile.default.invariant]
+runs = 32
+depth = 16
+fail_on_revert = false
+
+# Lower-fuzz CI profile. Override with `--profile ci` in CI runners.
+[profile.ci.fuzz]
+runs = 128

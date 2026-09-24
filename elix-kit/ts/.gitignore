@@ -1,0 +1,34 @@
+# Secrets
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Node / npm
+node_modules/
+dist/
+build/
+coverage/
+.npm/
+.npmrc
+
+# TypeScript
+*.tsbuildinfo
+*.js.map
+*.d.ts.map
+
+# Logs / caches
+*.log
+.DS_Store
+Thumbs.db
+.cache/
+
+# Vitest / v8 coverage
+coverage/
+coverage-report/
+
+# Editor
+.idea/
+.vscode/
+*.code-workspace
+*.swp
