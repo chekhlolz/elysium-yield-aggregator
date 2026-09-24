@@ -2,12 +2,12 @@
 
 **Prepared by**: Alexey — `@icesilentx` on X, `@chekhlolz` on GitHub
 **Repo**: https://github.com/chekhlolz/elysium-yield-aggregator (Apache-2.0,
-master, HEAD `0284a9d`)
+master, HEAD `0146a34`)
 **Prepared for**: Kinetiq builders team (Discord `discord.kinetiq.xyz` / DM
 `@Enter_Elysium` on X)
 **Status**: Reference-quality, not audited. Not sent — awaiting Kinetiq
 contact.
-**Date**: 2026-09-24
+**Date**: 2026-09-25
 
 ---
 
@@ -103,19 +103,35 @@ custody and revoke at any time.
 on the raw EIP-712 digest with canonical ECDSA checks (low-s, nonzero
 r/s, `v ∈ {27, 28}`).
 
-**Off-chain keeper**: `keeper-runtime/` is a TypeScript keeper runtime
-with bit-exact EIP-712 signing (hand-computed digest, not
-`TypedDataEncoder.hashTypedData`, because the contract inserts `_from`
-into the outer `abi.encode` even though `_from` is not in the typehash).
-Keeper runs locally on the delegator's machine; private key never
-touches the network.
+**Off-chain keeper runtime**: `keeper-runtime/` is a TypeScript
+keeper runtime with bit-exact EIP-712 signing (hand-computed digest,
+not `TypedDataEncoder.hashTypedData`, because the contract inserts
+`_from` into the outer `abi.encode` even though `_from` is not in the
+typehash). Keeper runs locally on the delegator's machine; private key
+never touches the network.
+
+Round-21 added the keeper daemon core:
+
+- `KeeperDaemon` polling loop with monotonic nonces (consumed only
+  on submission attempts; signing failures do not consume the nonce
+  because venue state is unambiguous, but `submitTrade` throws do
+  because venue state becomes ambiguous — the exact replay vector
+  the venue dedup is designed to catch).
+- Sliding-window rate limit (60 tx/min, `MAX_TXS_PER_MINUTE`).
+- Client-side per-order cap check, venue-side revoke check,
+  used-notional cap check.
+- `MockElysiumCoreWriter` in-memory venue adapter — FIFO queue,
+  `usedNotional` keyed by `(delegator, keeper, nonce)` triple,
+  `revoke` per pair. Adapter deliberately does not verify EIP-712
+  signatures — that's covered separately by `TradeOnlyAgent.sol`
+  and the signing test suite.
 
 **Revocation**: `revoke(keeper)` is venue-local and universal —
 revoking a keeper invalidates every pending delegation to that keeper
 from the same delegator, across venues.
 
 **Not audited**: reference-quality, adversarially reviewed internally
-over 18 rounds. `docs/AUDIT_SUMMARY.md` documents the review history
+over 24 rounds. `docs/AUDIT_SUMMARY.md` documents the review history
 and open items.
 
 ### 3. Dev harness for the HyperCore precompile
@@ -132,6 +148,20 @@ tests) that lets any new builder clone a working Elysium scaffold in
 under 5 minutes. Copy out of this repo, replace `HelloElysium.sol`
 with your contract, deploy against local Anvil with `CHAIN_ID=999`
 (placeholder — real chainId will come from Kinetiq).
+
+### 5. Ecosystem dashboard
+
+`dashboard/` — a static single-page HyperEVM ecosystem dashboard that
+pulled live from DeFiLlama. Shows TVL + APY for every Elysium-native
+yield venue (Kinetiq kHYPE, Liminal xHYPE, Morpho Blue, Veda,
+Gauntlet) plus a Robinhood Chain peer comparison. Chart.js 4.4.1
+SRI-pinned via jsDelivr, `<noscript>` fallback, no analytics, no
+cookies, no backend. `dashboard/refresh.py` is a 256-line stdlib-only
+fetcher that can be cron'd to keep `data.json` fresh. Round-22.
+
+The dashboard is shareable with Kinetiq without exposing any internal
+tooling: it's a read-only snapshot of public DeFiLlama data, framed
+around "this is the ecosystem the aggregator will run in."
 
 ---
 
@@ -192,14 +222,18 @@ asked.
 ## Repo hygiene
 
 - License: **Apache-2.0** (not MIT, not BSL).
-- Tests: 297 forge + 15 forge (elix-kit) + 74 vitest (keeper-runtime)
-  + 53 forge (dev-harness) = **439 tests total, all green**.
+- Tests: 297 forge + 15 forge (elix-kit) + 102 node:test
+  (keeper-runtime, round-21) + 53 forge (dev-harness) = **467 tests
+  total, all green**.
 - CI: `forge test --root .` runs locally; GitHub Actions not wired
   (M2 blocker).
 - Docs: `AGGREGATOR_SPEC.md`, `DELEGATION_SPEC.md`, `ROADMAP.md`,
-  `AUDIT_SUMMARY.md`, `TEST_COVERAGE_GAP.md`, plus 5 KI design docs.
+  `AUDIT_SUMMARY.md`, `TEST_COVERAGE_GAP.md`, plus 5 KI design docs
+  and a Kinetiq partners one-pager (this file).
 - Verifier: an external `check_repo.py` script runs 14 checks
-  (D1-D14, S1-S5, I1-I4); repo exits with 0 FAIL on round-15.
+  (D1-D14, S1-S5, I1-I4); repo exits with 0 FAIL as of round-24.
+- Public artifacts: `KINETIQ_EMAIL_DRAFT.md` (full proposal), this
+  one-pager, and the `dashboard/` snapshot.
 
 ---
 

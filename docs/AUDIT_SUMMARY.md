@@ -52,34 +52,35 @@ at commit `19efedc`.
 
 | # | Contract | Path | Deployed bytes | Purpose |
 |---|---|---|---|---|
-| 1 | `YieldAggregator` | `solidity/src/aggregator/YieldAggregator.sol` | 14,413 | ERC-4626 vault; keeper + timelock rebalance; delegate `withdraw`/`redeem` (KI-7/KI-8 patched); Stream-A delegation signing with a dev-fallback gate. |
+| 1 | `YieldAggregator` | `solidity/src/aggregator/YieldAggregator.sol` | 17,880 | ERC-4626 vault; keeper + timelock rebalance; delegate `withdraw`/`redeem` (KI-7/KI-8 patched); Stream-A delegation signing with a dev-fallback gate; round-17 added the 5th slot for Liminal xHYPE via `setXHYPELeg`. |
 | 2 | `TradeOnlyAgent` | `solidity/src/delegation/TradeOnlyAgent.sol` | 3,103 | EIP-712 trade delegation verifier; canonical ECDSA recovery; universal `revoke(keeper)`; venue-local notional cap with per-order enforcement. |
-| 3 | `RegimeDetector` | `solidity/src/keeper/RegimeDetector.sol` | 2,884 | Elysium market-data precompile adapter; regime classification across FUNDING_STRONG / WEAK / NEG / HIGH_VOL; hardened against hostile feeds. |
+| 3 | `RegimeDetector` | `solidity/src/keeper/RegimeDetector.sol` | 3,334 | Elysium market-data precompile adapter; regime classification across FUNDING_STRONG / WEAK / NEG / HIGH_VOL; hardened against hostile feeds; round-17 added `weightsForRegime5` for the 5-slot vectors. |
 | 4 | `KHYPELeg` | `solidity/src/legs/KHYPELeg.sol` | 7,743 | Wraps the kHYPE LST on HyperCore; yield accrues via the pool's exchange rate; KI-1 Option A2 rate-tracking; KI-3 through KI-6 patched. |
 | 5 | `SpotStakingLeg` | `solidity/src/legs/SpotStakingLeg.sol` | 7,767 | Direct HYPE staking on HyperEVM (24h unbonding hint); KI-1 Option A2 rate-tracking; same shape as `KHYPELeg` for the accounting path. |
-| 6 | `PerpFundingLeg` | `solidity/src/legs/PerpFundingLeg.sol` | 13,035 | Long-spot / short-perp on HyperCore HYPE-USD perp to capture funding; `submitIntent` for Stream-B LP intents; `_fallbackSig` gated by `devFallbackEnabled`. |
-| 7 | `BasisHedgeLeg` | `solidity/src/legs/BasisHedgeLeg.sol` | 13,023 | Same long-spot / short-perp shape at HR = 1.0 but targets basis carry; same `submitIntent` / `_fallbackSig` gate as `PerpFundingLeg`. |
+| 6 | `PerpFundingLeg` | `solidity/src/legs/PerpFundingLeg.sol` | 13,149 | Long-spot / short-perp on HyperCore HYPE-USD perp to capture funding; `submitIntent` for Stream-B LP intents; `_fallbackSig` gated by `devFallbackEnabled`. |
+| 7 | `BasisHedgeLeg` | `solidity/src/legs/BasisHedgeLeg.sol` | 13,137 | Same long-spot / short-perp shape at HR = 1.0 but targets basis carry; same `submitIntent` / `_fallbackSig` gate as `PerpFundingLeg`. |
+| 8 | `LiminalXHYPELeg` | `solidity/src/legs/LiminalXHYPELeg.sol` | 7,849 | ERC-4626 wrapper for Liminal xHYPE vault (14.50% APY live, off-Elysium as of writing). USDC→HYPE→vault flow with CCE reentrancy guard, slippage bound against oracle price post-swap, `oracle→vault→fixed` APY fallback chain, `harvest()` for residuals, `maxAllocationUsd` cap, `isLiquidatable()` gate, owner setters. Round-17. |
 
-**Total deployed bytecode**: 61,748 bytes across 7 contracts
+**Total deployed bytecode**: 73,962 bytes across 8 contracts
 (including `SafeERC20`, `RegimeId` enum, and the minimal
 `IERC20Minimal` facade).
 
-**Interfaces** (21 Solidity artifacts total across contracts + interfaces
+**Interfaces** (22 Solidity artifacts total across contracts + interfaces
 + lib): `IYieldAggregator`, `ITradeOnlyAgent`, `IYieldLeg`,
-`IIntentSubmittingLeg`, `IERC20`, `IERC20Router`, `IElysiumCoreWriter`,
-`IFundingSource`, `IPriceOracle`, `IStakingPool`, plus the inline
-`IMarketDataFeed` in `RegimeDetector.sol` and the `IERC20Minimal`
-facade. See the full table in `README.md §Contracts`.
+`IIntentSubmittingLeg`, `IXHYPELeg`, `IERC20`, `IERC20Router`,
+`IElysiumCoreWriter`, `IFundingSource`, `IPriceOracle`, `IStakingPool`,
+plus the inline `IMarketDataFeed` in `RegimeDetector.sol` and the
+`IERC20Minimal` facade. See the full table in `README.md §Contracts`.
 
 ---
 
 ## 3. Test coverage
 
-**212 forge tests green across 17 suites. `forge invariant` passes on
-3 aggregator invariants. External verifier (`check_repo.py`) at 0
-FAIL.**
+**297 forge tests green across 23 suites (round-23 refresh; was 212 /
+17 in the round-15 snapshot). `forge invariant` passes on 3 aggregator
+invariants. External verifier (`check_repo.py`) at 0 FAIL.**
 
-### Suite breakdown
+### Suite breakdown (round-15 snapshot, superseded)
 
 | Suite | File | Count |
 |---|---|---|
@@ -104,7 +105,40 @@ FAIL.**
 | `ElysiumCoreWriterIntegrationTest` | `solidity/test/ElysiumCoreWriterIntegration.t.sol` | 23 |
 | `AggInvariantTest` | `solidity/test/YieldAggregator.invariant.t.sol` | 1 campaign / 3 invariants |
 
-**Total: 212 tests across 17 suites.**
+**Total: 212 tests across 17 suites (round-15 snapshot).**
+
+### Round-13 through round-23 additions (post-snapshot)
+
+- **Round-13 (KI-1 rate-tracking fix, Option A2)**: added the
+  rate-tracking invariants already folded into the `LegsTest` /
+  `KI1aRateTrackingTest` counts above.
+- **Round-14 (last-mile M3 fuzz + ElysiumCoreWriter integration)**:
+  expanded `FuzzCoverage.t.sol` (24 → still 24 counted, but broader
+  parameter sweeps inside the existing tests) and the
+  `ElysiumCoreWriterIntegrationTest` (23).
+- **Round-17 (Liminal xHYPE 5th leg)**:
+  - `solidity/test/LiminalXHYPELeg.t.sol` — **39 tests**: deposit /
+    withdraw / withdrawFor / convert / preview / `setXHYPELeg` /
+    `harvest` / `isLiquidatable` / `maxAllocationUsd` cap / slippage
+    bound / CCE reentrancy / oracle→vault→fixed fallback / fuzz over
+    oracle price and vault exchange-rate deltas.
+  - `solidity/test/RegimeDetector.fifthLeg.t.sol` — **33 tests**:
+    5-slot weight vectors sum to 10,000 bps for all 4 regimes;
+    `XHYPE_WEIGHT_BPS` ≤ kHYPE weight per regime; `weightsForRegime5`
+    / `_weightsForRegime5` / `weights5` roundtrips; owner-only setter;
+    events.
+  - **+72 new forge tests**, bringing the parent forge total from 225
+    (round-15) to 297 (round-17 through 23).
+- **Round-21 (keeper daemon core)**: +28 node:test cases in
+  `keeper-runtime/test/` (17 daemon + 11 venue-adapter). Total
+  repo-wide tests now 467.
+
+**Current totals (round-23)**:
+- `solidity/`: **297 forge pass** across 23 suites.
+- `dev-harness/`: **53 forge pass**.
+- `elix-kit/solidity/`: **15 forge pass**.
+- `keeper-runtime/`: **102 node:test pass** (round-21).
+- **Repo-wide total: 467 tests, all green.**
 
 ### Invariant campaign
 
@@ -364,7 +398,7 @@ export PATH="$PATH:/c/Users/helpy/.foundry/bin"
 # Compile all Solidity
 forge build
 
-# Run the full forge test suite (212 tests, 17 suites)
+# Run the full forge test suite (297 tests, 23 suites; round-23)
 forge test
 
 # Run the aggregator invariant campaign (3 invariants)
@@ -377,7 +411,7 @@ python ~/Downloads/check_repo.py .
 Expected outcomes:
 
 - `forge build` — 0 errors, 0 warnings.
-- `forge test` — 212/212 pass, 17 suites.
+- `forge test` — 297/297 pass, 23 suites.
 - `forge invariant` — AggInvariantTest passes with 3 invariants
   (shareValueBounded, weightsSumTo10000, noDoubleCounting).
 - `check_repo.py` — 0 FAIL.
